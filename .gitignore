@@ -1,0 +1,21 @@
+node_modules/
+dist/
+build/
+.turbo/
+.cache/
+coverage/
+*.log
+.env
+.env.local
+.DS_Store
+.vscode/
+.idea/
+*.tsbuildinfo
+
+# Card data snapshots are regeneratable from YGOPRODeck
+packages/cards-data/data/cards.sqlite
+packages/cards-data/data/cards.json
+
+# Vite
+apps/web/dist/
+apps/*/dist/

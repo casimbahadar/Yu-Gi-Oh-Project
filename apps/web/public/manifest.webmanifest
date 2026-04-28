@@ -1,0 +1,11 @@
+{
+  "name": "Yu-Gi-Oh Fan Duel",
+  "short_name": "YGO Duel",
+  "description": "Open-source Yu-Gi-Oh fan dueling platform.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b0b18",
+  "theme_color": "#0b0b18",
+  "orientation": "any",
+  "icons": []
+}
