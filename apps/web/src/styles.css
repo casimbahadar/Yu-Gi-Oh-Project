@@ -59,6 +59,20 @@ body, html, #root { margin: 0; min-height: 100vh; }
   padding: .25rem;
 }
 
+.slot.selectable {
+  outline: 2px solid #3a8a5a;
+  outline-offset: 2px;
+}
+.slot.selected {
+  outline: 2px solid #e9c46a;
+  outline-offset: 2px;
+  background: #2a2a18;
+}
+.slot.attackable {
+  outline: 2px dashed #c44747;
+  outline-offset: 2px;
+}
+
 .hand {
   display: flex;
   gap: .5rem;

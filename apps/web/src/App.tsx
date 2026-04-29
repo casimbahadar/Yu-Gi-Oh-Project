@@ -5,13 +5,14 @@ import { connect, send } from "./net/ws-client.js";
 import { Field } from "./components/Field.js";
 import { Hand } from "./components/Hand.js";
 import { PhaseBar } from "./components/PhaseBar.js";
+import { EventLog } from "./components/EventLog.js";
 import { starterDeck } from "./decks/starter.js";
 
 const DEFAULT_WS = (import.meta as unknown as { env: Record<string, string> }).env
   .VITE_WS_URL ?? "ws://localhost:8787";
 
 export function App(): JSX.Element {
-  const { view, state, you, roomCode, opponentName, error } = useDuel();
+  const { view, state, events, you, roomCode, opponentName, error } = useDuel();
   const [name, setName] = useState("Duelist");
   const [joinCode, setJoinCode] = useState("");
 
@@ -72,6 +73,7 @@ export function App(): JSX.Element {
           <PhaseBar state={state} you={you} />
           <Field state={state} you={you} />
           <Hand state={state} you={you} />
+          <EventLog events={events} />
           <div style={{ color: "#6b6b8a", fontSize: 12 }}>
             Room: {roomCode} · Opponent: {opponentName || "(waiting…)"}
           </div>

@@ -9,7 +9,7 @@ import {
   type GameState,
   type PlayerState,
 } from "./state.js";
-import type { CardInstance, GameEvent, InstanceId, PlayerId } from "./types.js";
+import type { CardInstance, GameEvent, InstanceId, MonsterDefinition, PlayerId } from "./types.js";
 
 export interface ReduceResult {
   state: GameState;
@@ -68,11 +68,12 @@ function apply(s: GameState, a: Action, ev: GameEvent[]): void {
     case "ResolveChain":
       resolveChain(s, ev);
       return;
+    case "DeclareAttack":
+      return declareAttack(s, a.player, a.attacker, a.target, ev);
     // Skeletons — filled in during MVP card work.
     case "FlipSummon":
     case "ChangePosition":
     case "ActivateEffect":
-    case "DeclareAttack":
     case "SpecialSummon":
     case "ChainRespond":
     case "ChainPass":
@@ -143,6 +144,14 @@ function advancePhase(s: GameState, ev: GameEvent[]): void {
     const p = s.players[s.turnPlayer];
     p.normalSummonsUsed = 0;
     p.hasDrawnForTurn = false;
+    // Clear per-turn flags on every monster on the field.
+    for (const id of Object.keys(s.cards)) {
+      const c = s.cards[id]!;
+      if (c.location.zone === "mainMonster" || c.location.zone === "extraMonster") {
+        c.flags.hasAttacked = false;
+        c.flags.positionChangedThisTurn = false;
+      }
+    }
     ev.push({ kind: "TurnStarted", player: s.turnPlayer, turn: s.turn });
     // Auto-draw for turn (except first turn of going-first player per modern rules).
     if (!(s.turn === 1 && s.turnPlayer === 0)) {
@@ -302,6 +311,171 @@ function removeFromHand(p: PlayerState, id: InstanceId): void {
   const i = p.hand.indexOf(id);
   if (i < 0) throw new Error("Card not in hand");
   p.hand.splice(i, 1);
+}
+
+/**
+ * Declare an attack with `attackerId` against `target`. `target` is
+ * either a monster instance id on the opposing field, or "direct" for
+ * a direct attack (legal only when the opponent controls no monsters).
+ *
+ * MVP scope: no chain window for attack response (no Mirror Force yet),
+ * no replay step, no piercing/effect damage. Pure ATK/DEF math.
+ */
+function declareAttack(
+  s: GameState,
+  pid: PlayerId,
+  attackerId: InstanceId,
+  target: InstanceId | "direct",
+  ev: GameEvent[],
+): void {
+  if (s.phase !== "BattleStep") {
+    throw new Error("Attacks only during Battle Phase");
+  }
+  if (pid !== s.turnPlayer) throw new Error("Not your turn");
+  if (!battleAllowedOnTurn(s.turn)) throw new Error("No Battle Phase on turn 1");
+
+  const attacker = s.cards[attackerId];
+  if (!attacker) throw new Error("Unknown attacker");
+  if (attacker.controller !== pid) throw new Error("Not your monster");
+  if (attacker.location.zone !== "mainMonster" && attacker.location.zone !== "extraMonster") {
+    throw new Error("Attacker not on the field");
+  }
+  if (attacker.position !== "ATK" || !attacker.faceUp) {
+    throw new Error("Only face-up ATK position monsters can attack");
+  }
+  if (attacker.flags.hasAttacked === true) {
+    throw new Error("This monster has already attacked this turn");
+  }
+  const attackerDef = monsterDef(attacker.defId);
+  const opp = opponentOf(pid);
+
+  if (target === "direct") {
+    if (opponentHasMonster(s, opp)) {
+      throw new Error("Cannot attack directly while opponent controls a monster");
+    }
+    attacker.flags.hasAttacked = true;
+    changeLp(s, opp, -attackerDef.atk, ev);
+    ev.push({
+      kind: "DirectAttack",
+      attacker: attackerId,
+      damage: attackerDef.atk,
+    });
+    return;
+  }
+
+  const defender = s.cards[target];
+  if (!defender) throw new Error("Unknown target");
+  if (defender.controller !== opp) throw new Error("Target is not opponent's monster");
+  if (defender.location.zone !== "mainMonster" && defender.location.zone !== "extraMonster") {
+    throw new Error("Target not on the field");
+  }
+  const defenderDef = monsterDef(defender.defId);
+
+  // Face-down defenders flip face-up at the start of damage calculation.
+  if (defender.position === "FaceDownDEF") {
+    defender.faceUp = true;
+    defender.position = "DEF";
+    ev.push({ kind: "FlippedFaceUp", instanceId: target });
+    // Real rules: Flip effects trigger here. MVP: no flip effects implemented.
+  }
+
+  attacker.flags.hasAttacked = true;
+
+  if (defender.position === "ATK") {
+    // ATK vs ATK
+    const aATK = attackerDef.atk;
+    const dATK = defenderDef.atk;
+    if (aATK > dATK) {
+      changeLp(s, opp, -(aATK - dATK), ev);
+      destroyMonster(s, target, ev);
+    } else if (aATK < dATK) {
+      changeLp(s, pid, -(dATK - aATK), ev);
+      destroyMonster(s, attackerId, ev);
+    } else {
+      // Equal: both destroyed, no damage.
+      destroyMonster(s, attackerId, ev);
+      destroyMonster(s, target, ev);
+    }
+    ev.push({
+      kind: "BattleResolved",
+      attacker: attackerId,
+      target,
+      mode: "ATKvsATK",
+      attackerATK: aATK,
+      targetATK: dATK,
+    });
+  } else {
+    // ATK vs DEF (face-up DEF). No piercing in MVP.
+    const aATK = attackerDef.atk;
+    const dDEF = defenderDef.def ?? 0;
+    if (aATK > dDEF) {
+      destroyMonster(s, target, ev);
+    } else if (aATK < dDEF) {
+      changeLp(s, pid, -(dDEF - aATK), ev);
+    }
+    // Equal: nothing happens.
+    ev.push({
+      kind: "BattleResolved",
+      attacker: attackerId,
+      target,
+      mode: "ATKvsDEF",
+      attackerATK: aATK,
+      targetDEF: dDEF,
+    });
+  }
+}
+
+function opponentHasMonster(s: GameState, opp: PlayerId): boolean {
+  const inMain = s.players[opp].mainMonster.some((id) => id !== null);
+  const inExtra = s.extraMonsterZones.some((id) => id !== null && s.cards[id]?.controller === opp);
+  return inMain || inExtra;
+}
+
+function monsterDef(defId: number): MonsterDefinition {
+  const def = requireCard(defId);
+  if (def.cardType !== "Monster") {
+    throw new Error(`Card ${defId} is not a monster`);
+  }
+  return def;
+}
+
+function destroyMonster(s: GameState, id: InstanceId, ev: GameEvent[]): void {
+  const card = s.cards[id];
+  if (!card) return;
+  const owner = s.players[card.owner];
+  const ctrl = s.players[card.controller];
+  const loc = card.location;
+  if (loc.zone === "mainMonster") {
+    ctrl.mainMonster[loc.index] = null;
+  } else if (loc.zone === "extraMonster") {
+    s.extraMonsterZones[loc.index] = null;
+  }
+  // Xyz materials beneath the destroyed monster also go to GY.
+  for (const matId of card.attached) {
+    const mat = s.cards[matId];
+    if (!mat) continue;
+    mat.location = { controller: mat.owner, zone: "graveyard", index: s.players[mat.owner].graveyard.length };
+    s.players[mat.owner].graveyard.push(matId);
+    ev.push({ kind: "MaterialToGraveyard", instanceId: matId });
+  }
+  card.attached = [];
+  card.location = { controller: card.owner, zone: "graveyard", index: owner.graveyard.length };
+  card.controller = card.owner;
+  card.position = undefined;
+  card.faceUp = true;
+  owner.graveyard.push(id);
+  ev.push({ kind: "Destroyed", instanceId: id, by: "battle" });
+}
+
+function changeLp(s: GameState, pid: PlayerId, delta: number, ev: GameEvent[]): void {
+  const p = s.players[pid];
+  p.lifePoints = Math.max(0, p.lifePoints + delta);
+  ev.push({ kind: "LifePointsChanged", player: pid, delta, total: p.lifePoints });
+  if (p.lifePoints === 0 && !s.ended) {
+    s.ended = true;
+    s.winner = opponentOf(pid);
+    ev.push({ kind: "Victory", player: s.winner, reason: "LP to 0" });
+  }
 }
 
 function newInstanceId(s: GameState): InstanceId {
