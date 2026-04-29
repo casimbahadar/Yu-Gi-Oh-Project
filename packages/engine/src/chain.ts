@@ -76,3 +76,22 @@ export function pushLink(
 ): void {
   state.chain.push({ source, controller, spellSpeed, effectKey, payload });
 }
+
+/**
+ * Map from card definition id → primary on-activation effect key.
+ * Used by the reducer when a Spell/Trap is activated, to know which
+ * registered resolver to put on the chain. Cards that have multiple
+ * possible activations should pick the right key in their UI.
+ */
+const activationByDefId = new Map<number, string>();
+
+export function bindActivation(defId: number, effectKey: string): void {
+  if (activationByDefId.has(defId)) {
+    throw new Error(`Activation already bound for card ${defId}`);
+  }
+  activationByDefId.set(defId, effectKey);
+}
+
+export function getActivationEffect(defId: number): string | undefined {
+  return activationByDefId.get(defId);
+}

@@ -7,10 +7,10 @@
  * can use the same numeric keys without migration.
  */
 
-import { registerEffect } from "../chain.js";
+import { bindActivation, registerEffect } from "../chain.js";
 import { draw, destroy, changeLifePoints } from "../effects/primitives.js";
 import { registerMany } from "../registry.js";
-import type { CardDefinition } from "../types.js";
+import type { CardDefinition, InstanceId, PlayerId } from "../types.js";
 
 const cards: CardDefinition[] = [
   // --- Normal Monsters ---
@@ -38,8 +38,44 @@ const cards: CardDefinition[] = [
     def: 2500,
     text: "This legendary dragon is a powerful engine of destruction.",
   },
+  {
+    id: 15025844,
+    name: "Mystical Elf",
+    cardType: "Monster",
+    kinds: ["Normal"],
+    attribute: "LIGHT",
+    race: "Spellcaster",
+    level: 4,
+    atk: 800,
+    def: 2000,
+    text: "An elf renowned for its incredible defensive technique.",
+  },
+  {
+    id: 69140098,
+    name: "Gemini Elf",
+    cardType: "Monster",
+    kinds: ["Normal"],
+    attribute: "EARTH",
+    race: "Spellcaster",
+    level: 4,
+    atk: 1900,
+    def: 900,
+    text: "Twin elves who tease their attackers and beguile their enemies.",
+  },
+  {
+    id: 78658564,
+    name: "Goblin Attack Force",
+    cardType: "Monster",
+    kinds: ["Normal"],
+    attribute: "EARTH",
+    race: "Warrior",
+    level: 4,
+    atk: 2300,
+    def: 0,
+    text: "A goblin force that ferociously attacks at any cost.",
+  },
 
-  // --- Effect Monster ---
+  // --- Effect Monsters ---
   {
     id: 14558127,
     name: "Ash Blossom & Joyous Spring",
@@ -51,6 +87,18 @@ const cards: CardDefinition[] = [
     atk: 0,
     def: 1800,
     text: "Hand trap. Negate one of: adds from deck / special summons from deck / sends from deck / mills.",
+  },
+  {
+    id: 70781052,
+    name: "Summoned Skull",
+    cardType: "Monster",
+    kinds: ["Effect"],
+    attribute: "DARK",
+    race: "Fiend",
+    level: 6,
+    atk: 2500,
+    def: 1200,
+    text: "A fiend with dark powers. (Tribute Summon target.)",
   },
 
   // --- Ritual ---
@@ -181,22 +229,61 @@ const cards: CardDefinition[] = [
 registerMany(cards);
 
 // --- Effect scripts ---
+
 // Pot of Greed: draw 2.
 registerEffect("spell:pot-of-greed:draw", (state, link, events) => {
   draw(state, link.controller, 2, events);
 });
+bindActivation(53129443, "spell:pot-of-greed:draw");
 
 // Raigeki: destroy all monsters the opponent controls.
 registerEffect("spell:raigeki:nuke-monsters", (state, link, events) => {
-  const opp = (1 - link.controller) as 0 | 1;
+  const opp = (1 - link.controller) as PlayerId;
   const ids = [
-    ...state.players[opp].mainMonster.filter((x): x is string => x !== null),
+    ...state.players[opp].mainMonster.filter((x): x is InstanceId => x !== null),
     ...state.extraMonsterZones.filter(
-      (x): x is string => x !== null && state.cards[x]?.controller === opp,
+      (x): x is InstanceId => x !== null && state.cards[x]?.controller === opp,
     ),
   ];
   for (const id of ids) destroy(state, id, events);
 });
+bindActivation(12580477, "spell:raigeki:nuke-monsters");
+
+// Monster Reborn: payload.target is the InstanceId of a monster in either
+// player's graveyard. We Special Summon it face-up ATK to the caster's
+// first empty Main Monster Zone, controller switches to caster.
+registerEffect("spell:monster-reborn:revive", (state, link, events) => {
+  const pid = link.controller;
+  const targetId = link.payload?.target as InstanceId | undefined;
+  if (!targetId) {
+    events.push({ kind: "EffectFizzled", reason: "no target", source: link.source });
+    return;
+  }
+  const card = state.cards[targetId];
+  if (!card || card.location.zone !== "graveyard") {
+    events.push({ kind: "EffectFizzled", reason: "target not in graveyard", source: link.source });
+    return;
+  }
+  const me = state.players[pid];
+  const slot = me.mainMonster.findIndex((x) => x === null);
+  if (slot < 0) {
+    events.push({ kind: "EffectFizzled", reason: "no monster zone", source: link.source });
+    return;
+  }
+  // Remove from owner's graveyard.
+  const owner = state.players[card.owner];
+  const i = owner.graveyard.indexOf(targetId);
+  if (i >= 0) owner.graveyard.splice(i, 1);
+  // Move to caster's field.
+  card.controller = pid;
+  card.location = { controller: pid, zone: "mainMonster", index: slot };
+  card.position = "ATK";
+  card.faceUp = true;
+  card.flags = { ...card.flags, summonedThisTurn: true, hasAttacked: false, positionChangedThisTurn: false };
+  me.mainMonster[slot] = targetId;
+  events.push({ kind: "SpecialSummon", player: pid, instanceId: targetId, slot, position: "ATK", from: "graveyard" });
+});
+bindActivation(83764718, "spell:monster-reborn:revive");
 
 // Solemn Judgment: pay half LP; negate. Negation is done by the chain
 // resolver flagging the target link's effectKey — stubbed here as LP pay.

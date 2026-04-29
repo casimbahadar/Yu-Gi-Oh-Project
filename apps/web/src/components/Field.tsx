@@ -15,23 +15,26 @@ interface SlotProps {
   selected: boolean;
   attackable: boolean;
   onClick?: () => void;
+  footer?: JSX.Element | null;
 }
 
-function CardSlot({ state, id, selectable, selected, attackable, onClick }: SlotProps): JSX.Element {
+function CardSlot({ state, id, selectable, selected, attackable, onClick, footer }: SlotProps): JSX.Element {
   if (!id) return <div className="slot">·</div>;
   const card = state.cards[id];
   if (!card) return <div className="slot">?</div>;
-  let label = `#${card.defId}`;
+  let label = card.defId === -1 ? "(hidden)" : `#${card.defId}`;
   let stats = "";
-  try {
-    const def = requireCard(card.defId);
-    label = def.name;
-    if (def.cardType === "Monster") {
-      const atk = def.atk;
-      const defv = def.def ?? "—";
-      stats = `${atk} / ${defv}`;
-    }
-  } catch { /* unknown card */ }
+  if (card.defId !== -1) {
+    try {
+      const def = requireCard(card.defId);
+      label = def.name;
+      if (def.cardType === "Monster") {
+        const atk = def.atk;
+        const defv = def.def ?? "—";
+        stats = `${atk} / ${defv}`;
+      }
+    } catch { /* unknown card */ }
+  }
   const positionLabel =
     card.position === "ATK" ? "ATK"
     : card.position === "DEF" ? "DEF"
@@ -50,13 +53,16 @@ function CardSlot({ state, id, selectable, selected, attackable, onClick }: Slot
       title={card.faceUp ? label : "(face-down)"}
       onClick={onClick}
       role={onClick ? "button" : undefined}
-      style={{ cursor: onClick ? "pointer" : "default" }}
+      style={{ cursor: onClick ? "pointer" : "default", display: "flex", flexDirection: "column", justifyContent: "space-between" }}
     >
-      <small style={{ display: "block", lineHeight: 1.1 }}>
-        {card.faceUp ? label : "set"}
-      </small>
-      {card.faceUp && stats && <small style={{ opacity: 0.6 }}>{stats}</small>}
-      {positionLabel && <small style={{ opacity: 0.6 }}>{positionLabel}</small>}
+      <div>
+        <small style={{ display: "block", lineHeight: 1.1, fontWeight: 600 }}>
+          {card.faceUp ? label : "set"}
+        </small>
+        {card.faceUp && stats && <small style={{ opacity: 0.6 }}>{stats}</small>}
+        {positionLabel && <small style={{ opacity: 0.6 }}>{positionLabel}</small>}
+      </div>
+      {footer}
     </div>
   );
 }
@@ -66,12 +72,13 @@ export function Field({ state, you }: Props): JSX.Element {
   const me = state.players[you];
   const them = state.players[opp];
 
+  const yourTurn = state.turnPlayer === you;
+  const inMain = (state.phase === "Main1" || state.phase === "Main2") && yourTurn && !state.ended;
   const yourBattleStep =
-    state.phase === "BattleStep" && state.turnPlayer === you && !state.ended;
+    state.phase === "BattleStep" && yourTurn && !state.ended;
 
   const [selectedAttacker, setSelectedAttacker] = useState<InstanceId | null>(null);
 
-  // Validate the stored attacker still belongs to us / hasn't attacked.
   const attacker = selectedAttacker ? state.cards[selectedAttacker] : null;
   const attackerStillValid =
     !!attacker &&
@@ -81,23 +88,11 @@ export function Field({ state, you }: Props): JSX.Element {
     attacker.faceUp &&
     attacker.flags.hasAttacked !== true;
 
-  if (selectedAttacker && !attackerStillValid) {
-    // Reset on next render via state — done below in click handler reset path.
-  }
-
   const oppHasMonster = them.mainMonster.some((id) => id !== null);
 
   const declareAttack = (target: InstanceId | "direct"): void => {
     if (!selectedAttacker || !attackerStillValid) return;
-    send({
-      type: "submitAction",
-      action: {
-        kind: "DeclareAttack",
-        player: you,
-        attacker: selectedAttacker,
-        target,
-      },
-    });
+    send({ type: "submitAction", action: { kind: "DeclareAttack", player: you, attacker: selectedAttacker, target } });
     setSelectedAttacker(null);
   };
 
@@ -108,6 +103,79 @@ export function Field({ state, you }: Props): JSX.Element {
   };
   const oppMonsterAttackable = (id: InstanceId | null): boolean =>
     yourBattleStep && !!id && attackerStillValid;
+
+  const monsterFooter = (id: InstanceId | null): JSX.Element | null => {
+    if (!inMain || !id) return null;
+    const c = state.cards[id];
+    if (!c) return null;
+    const canChangeATK =
+      c.faceUp && c.position === "DEF" &&
+      c.flags.summonedThisTurn !== true &&
+      c.flags.positionChangedThisTurn !== true &&
+      c.flags.hasAttacked !== true;
+    const canChangeDEF =
+      c.faceUp && c.position === "ATK" &&
+      c.flags.summonedThisTurn !== true &&
+      c.flags.positionChangedThisTurn !== true &&
+      c.flags.hasAttacked !== true;
+    const canFlip =
+      !c.faceUp && c.position === "FaceDownDEF" &&
+      c.flags.summonedThisTurn !== true;
+    if (!canChangeATK && !canChangeDEF && !canFlip) return null;
+    return (
+      <div style={{ display: "flex", gap: 2, marginTop: 4, justifyContent: "center", flexWrap: "wrap" }}>
+        {canChangeATK && (
+          <button
+            style={{ padding: "1px 4px", fontSize: 10 }}
+            onClick={(e) => {
+              e.stopPropagation();
+              send({ type: "submitAction", action: { kind: "ChangePosition", player: you, monster: id, position: "ATK" } });
+            }}
+          >→ATK</button>
+        )}
+        {canChangeDEF && (
+          <button
+            style={{ padding: "1px 4px", fontSize: 10 }}
+            onClick={(e) => {
+              e.stopPropagation();
+              send({ type: "submitAction", action: { kind: "ChangePosition", player: you, monster: id, position: "DEF" } });
+            }}
+          >→DEF</button>
+        )}
+        {canFlip && (
+          <button
+            style={{ padding: "1px 4px", fontSize: 10 }}
+            onClick={(e) => {
+              e.stopPropagation();
+              send({ type: "submitAction", action: { kind: "FlipSummon", player: you, monster: id } });
+            }}
+          >Flip</button>
+        )}
+      </div>
+    );
+  };
+
+  const spellTrapFooter = (id: InstanceId | null): JSX.Element | null => {
+    if (!yourTurn || !id) return null;
+    const c = state.cards[id];
+    if (!c || c.controller !== you || c.faceUp) return null;
+    if (c.defId === -1) return null;
+    let isSpell = false;
+    try { isSpell = requireCard(c.defId).cardType === "Spell"; } catch { /* */ }
+    if (!isSpell) return null;
+    if (state.phase !== "Main1" && state.phase !== "Main2") return null;
+    return (
+      <div style={{ marginTop: 4, textAlign: "center" }}>
+        <button
+          style={{ padding: "1px 4px", fontSize: 10 }}
+          onClick={(e) => {
+            e.stopPropagation();
+            send({ type: "submitAction", action: { kind: "ActivateSetSpell", player: you, spellTrap: id } });
+          }}
+        >Activate</button>
+      </div>
+    );
+  };
 
   return (
     <div className="field" aria-label="duel field">
@@ -172,6 +240,7 @@ export function Field({ state, you }: Props): JSX.Element {
               selected={!!id && id === selectedAttacker}
               attackable={false}
               onClick={yourMonsterClickable(id) ? () => setSelectedAttacker(id!) : undefined}
+              footer={monsterFooter(id)}
             />
           ))}
         </div>
@@ -184,6 +253,7 @@ export function Field({ state, you }: Props): JSX.Element {
               selectable={false}
               selected={false}
               attackable={false}
+              footer={spellTrapFooter(id)}
             />
           ))}
         </div>

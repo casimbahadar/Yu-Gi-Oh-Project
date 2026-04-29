@@ -1,5 +1,5 @@
 import type { Action } from "./actions.js";
-import { resolveChain } from "./chain.js";
+import { getActivationEffect, pushLink, resolveChain } from "./chain.js";
 import { nextPhase, battleAllowedOnTurn } from "./phases.js";
 import { mulberry32, shuffleInPlace } from "./rng.js";
 import { requireCard } from "./registry.js";
@@ -57,9 +57,11 @@ function apply(s: GameState, a: Action, ev: GameEvent[]): void {
     case "TributeSummon":
       return tributeSummon(s, a.player, a.hand, a.slot, a.tributes, a.position, ev);
     case "PlaySpell":
-      return playSpell(s, a.player, a.hand, a.slot, a.faceDown, ev);
+      return playSpell(s, a.player, a.hand, a.slot, a.faceDown, a.payload, ev);
     case "SetTrap":
-      return playSpell(s, a.player, a.hand, a.slot, true, ev);
+      return playSpell(s, a.player, a.hand, a.slot, true, undefined, ev);
+    case "ActivateSetSpell":
+      return activateSetSpell(s, a.player, a.spellTrap, a.payload, ev);
     case "Concede":
       s.ended = true;
       s.winner = opponentOf(a.player);
@@ -70,9 +72,11 @@ function apply(s: GameState, a: Action, ev: GameEvent[]): void {
       return;
     case "DeclareAttack":
       return declareAttack(s, a.player, a.attacker, a.target, ev);
-    // Skeletons — filled in during MVP card work.
-    case "FlipSummon":
     case "ChangePosition":
+      return changePosition(s, a.player, a.monster, a.position, ev);
+    case "FlipSummon":
+      return flipSummon(s, a.player, a.monster, ev);
+    // Skeletons — filled in during MVP card work.
     case "ActivateEffect":
     case "SpecialSummon":
     case "ChainRespond":
@@ -150,6 +154,7 @@ function advancePhase(s: GameState, ev: GameEvent[]): void {
       if (c.location.zone === "mainMonster" || c.location.zone === "extraMonster") {
         c.flags.hasAttacked = false;
         c.flags.positionChangedThisTurn = false;
+        c.flags.summonedThisTurn = false;
       }
     }
     ev.push({ kind: "TurnStarted", player: s.turnPlayer, turn: s.turn });
@@ -220,6 +225,9 @@ function normalSummon(
   card.location = { controller: pid, zone: "mainMonster", index: slot };
   card.position = position;
   card.faceUp = position !== "FaceDownDEF";
+  card.flags.summonedThisTurn = true;
+  card.flags.hasAttacked = false;
+  card.flags.positionChangedThisTurn = false;
   p.normalSummonsUsed += 1;
   ev.push({
     kind: position === "FaceDownDEF" ? "MonsterSet" : "NormalSummon",
@@ -266,6 +274,9 @@ function tributeSummon(
   card.location = { controller: pid, zone: "mainMonster", index: slot };
   card.position = position;
   card.faceUp = true;
+  card.flags.summonedThisTurn = true;
+  card.flags.hasAttacked = false;
+  card.flags.positionChangedThisTurn = false;
   p.normalSummonsUsed += 1;
   ev.push({ kind: "TributeSummon", player: pid, instanceId: handInstance, slot, position });
 }
@@ -276,6 +287,7 @@ function playSpell(
   handInstance: InstanceId,
   slot: number,
   faceDown: boolean,
+  payload: Record<string, unknown> | undefined,
   ev: GameEvent[],
 ): void {
   const p = s.players[pid];
@@ -290,6 +302,13 @@ function playSpell(
   if (def.cardType === "Trap" && !faceDown) {
     throw new Error("Traps must be Set before activation");
   }
+  if (!faceDown && s.turnPlayer !== pid) {
+    throw new Error("Spells can only be activated on your turn (MVP — no Quick-Play)");
+  }
+  if (!faceDown && def.cardType === "Spell" && def.kind === "Normal" &&
+      s.phase !== "Main1" && s.phase !== "Main2") {
+    throw new Error("Normal Spells activate in Main Phase");
+  }
   if (slot < 0 || slot >= 5) throw new Error("Invalid slot");
   if (p.spellTrap[slot] !== null) throw new Error("Slot occupied");
 
@@ -303,14 +322,178 @@ function playSpell(
     instanceId: handInstance,
     slot,
   });
-  // Face-up Spells would trigger their activation effect here and go onto the chain.
-  // Left as TODO for the MVP card-script pass.
+
+  // Set cards just sit there. Face-up activations resolve immediately
+  // (no chain-response window in MVP).
+  if (faceDown) return;
+  resolveSpellActivation(s, pid, handInstance, def, payload, ev);
+}
+
+/**
+ * Activate a previously Set Spell from your own field.
+ * MVP: only your turn, only Spells (Traps need a chain window).
+ */
+function activateSetSpell(
+  s: GameState,
+  pid: PlayerId,
+  spellTrapInstance: InstanceId,
+  payload: Record<string, unknown> | undefined,
+  ev: GameEvent[],
+): void {
+  if (s.turnPlayer !== pid) throw new Error("Only on your turn (MVP)");
+  const card = s.cards[spellTrapInstance];
+  if (!card || card.controller !== pid || card.location.zone !== "spellTrap") {
+    throw new Error("Card not in your Spell/Trap zone");
+  }
+  if (card.faceUp) throw new Error("Card already face-up");
+  const def = requireCard(card.defId);
+  if (def.cardType !== "Spell") {
+    throw new Error("Activating face-down Traps requires a chain response window (not in MVP)");
+  }
+  card.faceUp = true;
+  ev.push({ kind: "SpellActivated", player: pid, instanceId: spellTrapInstance, slot: card.location.index });
+  resolveSpellActivation(s, pid, spellTrapInstance, def, payload, ev);
+}
+
+/**
+ * Common path: push the spell's bound effect to the chain, resolve,
+ * and (for Normal/Ritual Spells) send the spell to the GY afterwards.
+ */
+function resolveSpellActivation(
+  s: GameState,
+  pid: PlayerId,
+  source: InstanceId,
+  def: import("./types.js").CardDefinition,
+  payload: Record<string, unknown> | undefined,
+  ev: GameEvent[],
+): void {
+  if (def.cardType !== "Spell") return;
+  const effectKey = getActivationEffect(def.id);
+  if (effectKey) {
+    pushLink(s, source, pid, 1, effectKey, payload ?? {});
+    resolveChain(s, ev);
+  } else {
+    ev.push({ kind: "EffectFizzled", reason: "no resolver", source, defId: def.id });
+  }
+  // Normal/Ritual Spells go to GY after resolution. Continuous/Field/Equip remain.
+  if (def.kind === "Normal" || def.kind === "Ritual") {
+    sendCardToGraveyard(s, source, ev);
+  }
 }
 
 function removeFromHand(p: PlayerState, id: InstanceId): void {
   const i = p.hand.indexOf(id);
   if (i < 0) throw new Error("Card not in hand");
   p.hand.splice(i, 1);
+}
+
+/**
+ * Manual position change. Once per turn per monster, only in your
+ * Main Phase, only on a face-up monster, never on the turn the monster
+ * was Summoned, never if it has attacked this turn.
+ */
+function changePosition(
+  s: GameState,
+  pid: PlayerId,
+  monsterId: InstanceId,
+  position: import("./types.js").Position,
+  ev: GameEvent[],
+): void {
+  if (s.phase !== "Main1" && s.phase !== "Main2") {
+    throw new Error("Position change only in Main Phase");
+  }
+  if (s.turnPlayer !== pid) throw new Error("Not your turn");
+  const card = s.cards[monsterId];
+  if (!card) throw new Error("Unknown monster");
+  if (card.controller !== pid) throw new Error("Not your monster");
+  if (card.location.zone !== "mainMonster" && card.location.zone !== "extraMonster") {
+    throw new Error("Monster not on the field");
+  }
+  if (!card.faceUp) {
+    throw new Error("Cannot manually change position of a face-down monster (Flip Summon it)");
+  }
+  if (position !== "ATK" && position !== "DEF") {
+    throw new Error("Manual position change can only set ATK or face-up DEF");
+  }
+  if (card.position === position) {
+    throw new Error("Already in that position");
+  }
+  if (card.flags.summonedThisTurn === true) {
+    throw new Error("Cannot change position the turn the monster was Summoned");
+  }
+  if (card.flags.positionChangedThisTurn === true) {
+    throw new Error("Position already changed this turn");
+  }
+  if (card.flags.hasAttacked === true) {
+    throw new Error("Cannot change position after attacking this turn");
+  }
+  card.position = position;
+  card.flags.positionChangedThisTurn = true;
+  ev.push({ kind: "PositionChanged", player: pid, instanceId: monsterId, position });
+}
+
+/**
+ * Flip Summon: face-down DEF → face-up ATK. Main Phase, your turn,
+ * not the turn the monster was Set. Counts as a Summon (sets
+ * `summonedThisTurn`), but does NOT consume your Normal Summon.
+ */
+function flipSummon(
+  s: GameState,
+  pid: PlayerId,
+  monsterId: InstanceId,
+  ev: GameEvent[],
+): void {
+  if (s.phase !== "Main1" && s.phase !== "Main2") {
+    throw new Error("Flip Summon only in Main Phase");
+  }
+  if (s.turnPlayer !== pid) throw new Error("Not your turn");
+  const card = s.cards[monsterId];
+  if (!card) throw new Error("Unknown monster");
+  if (card.controller !== pid) throw new Error("Not your monster");
+  if (card.location.zone !== "mainMonster") {
+    throw new Error("Flip Summon target must be in your Main Monster Zone");
+  }
+  if (card.position !== "FaceDownDEF" || card.faceUp) {
+    throw new Error("Target is not a face-down monster");
+  }
+  if (card.flags.summonedThisTurn === true) {
+    throw new Error("Cannot Flip Summon a monster Set this turn");
+  }
+  card.faceUp = true;
+  card.position = "ATK";
+  card.flags.summonedThisTurn = true;
+  card.flags.positionChangedThisTurn = false;
+  card.flags.hasAttacked = false;
+  ev.push({ kind: "FlipSummon", player: pid, instanceId: monsterId });
+  // Real rules: Flip effects trigger here. None of our MVP cards have one.
+}
+
+/** Send a non-monster card from anywhere to its owner's Graveyard. */
+function sendCardToGraveyard(
+  s: GameState,
+  id: InstanceId,
+  ev: GameEvent[],
+): void {
+  const card = s.cards[id];
+  if (!card) return;
+  const ctrl = s.players[card.controller];
+  const loc = card.location;
+  if (loc.zone === "spellTrap") ctrl.spellTrap[loc.index] = null;
+  else if (loc.zone === "field") ctrl.field = null;
+  else if (loc.zone === "hand") {
+    const i = ctrl.hand.indexOf(id);
+    if (i >= 0) ctrl.hand.splice(i, 1);
+  }
+  card.location = {
+    controller: card.owner,
+    zone: "graveyard",
+    index: s.players[card.owner].graveyard.length,
+  };
+  card.controller = card.owner;
+  card.position = undefined;
+  card.faceUp = true;
+  s.players[card.owner].graveyard.push(id);
+  ev.push({ kind: "SentToGraveyard", instanceId: id });
 }
 
 /**

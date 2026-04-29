@@ -3,9 +3,57 @@ import type { ClientToServer, ServerToClient } from "@ygo/shared";
 import {
   createInitialState,
   reduce,
+  type CardInstance,
   type GameState,
   type PlayerId,
 } from "@ygo/engine";
+
+/**
+ * Hidden-info sentinel. When a card's identity must be hidden from
+ * the viewer, we replace its `defId` with this and clear `position`
+ * details. Card definitions on the client treat this as "unknown".
+ */
+const HIDDEN_DEF_ID = -1;
+
+/**
+ * Returns a copy of the state with cards the viewer shouldn't see
+ * redacted: the opponent's hand, the opponent's deck, the opponent's
+ * extra deck, and any face-down card the opponent controls.
+ */
+function redactStateFor(state: GameState, viewer: PlayerId): GameState {
+  const opp = (1 - viewer) as PlayerId;
+  const view = structuredClone(state);
+  for (const id of Object.keys(view.cards)) {
+    const c = view.cards[id]!;
+    if (shouldHide(c, viewer, opp)) {
+      view.cards[id] = {
+        ...c,
+        defId: HIDDEN_DEF_ID,
+        faceUp: false,
+      };
+    }
+  }
+  return view;
+}
+
+function shouldHide(c: CardInstance, viewer: PlayerId, opp: PlayerId): boolean {
+  if (c.controller !== opp && c.owner !== opp) return false;
+  // Opponent's hand and deck are always hidden.
+  if (c.controller === opp && (c.location.zone === "hand" || c.location.zone === "deck")) {
+    return true;
+  }
+  // Opponent's extra deck is hidden (per modern rules — face-down extras).
+  if (c.controller === opp && c.location.zone === "extraDeck") {
+    return true;
+  }
+  // Face-down cards on opponent's field are hidden.
+  if (c.controller === opp && !c.faceUp && (c.location.zone === "mainMonster" || c.location.zone === "spellTrap" || c.location.zone === "extraMonster")) {
+    return true;
+  }
+  return false;
+}
+
+declare const structuredClone: <T>(value: T) => T;
 
 interface Seat {
   clientId: string;
@@ -104,9 +152,8 @@ export class DuelRoom {
     for (let pid: PlayerId = 0; pid <= 1; pid = (pid + 1) as PlayerId) {
       const seat = this.seats[pid];
       if (!seat) continue;
-      // Hidden info: hide opponent hand face-down contents. We still send
-      // the full state for MVP simplicity; a fog-of-war pass comes later.
-      this.send(seat.ws, { type: "duelState", state: this.state, events });
+      const view = redactStateFor(this.state, pid);
+      this.send(seat.ws, { type: "duelState", state: view, events });
       if (pid === 1) break;
     }
   }

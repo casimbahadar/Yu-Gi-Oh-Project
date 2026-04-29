@@ -12,20 +12,27 @@ This repo currently holds the **MVP foundation**: a headless rules engine, a Web
 - Monorepo (pnpm workspaces) with engine, shared protocol, cards-data, server, and web packages
 - Deterministic rules engine: serializable `GameState`, pure reducer, seeded RNG
 - Turn/phase state machine (Draw → Standby → Main1 → Battle → Main2 → End)
-- Normal Summon, Tribute Summon, Set Monster, Set/Play Spell/Trap, Concede
+- Normal Summon, Tribute Summon (1- and 2-tribute), Set Monster, Flip Summon
+- Manual position change (ATK ↔ DEF) with once-per-turn / summon-turn / post-attack guards
+- Set / Play Spell, Set Trap, activate face-down Spells from your field
+- Spell activation pipeline: Pot of Greed (draw 2), Raigeki (board wipe), Monster Reborn (revive from any GY)
+- Battle Phase: attack declaration, ATK-vs-ATK / ATK-vs-DEF math, direct attacks, face-down flip-on-attack, per-monster once-per-turn lock
+- Concede, life-points-to-zero victory, deck-out victory
 - Chain / Spell Speed scaffolding with pluggable per-card effect resolvers
-- Representative sample cards: Dark Magician, Blue-Eyes, Ash Blossom, Relinquished, Blue-Eyes Ultimate Dragon, Stardust Dragon, Utopia, Stargazer Magician, Decode Talker, Pot of Greed, Raigeki, Monster Reborn, Mirror Force, Solemn Judgment
+- Server-side fog of war: opponent hand, deck, extra deck, and face-down field cards are redacted before broadcast
 - WebSocket duel server with private room codes
-- React client with field view, hand, phase bar, and room create/join
+- React client with: field view, hand actions (Summon ATK / Set Monster / Tribute Summon / Activate / Set), in-slot position-change & flip & activate-set buttons, click-to-attack flow, event log, phase bar
 - PWA manifest (installable on mobile browsers)
 - YGOPRODeck snapshot CLI (`pnpm cards:refresh`)
+- 23 engine tests covering bootstrap, summons, position changes, flips, spells, and the battle phase
 
 **Stubbed / not yet implemented**
 - Special Summons (Fusion/Synchro/Xyz/Link/Ritual/Pendulum) — engine accepts the action shape but doesn't yet compute materials or validate procedures
-- Chain resolution UI (responding with Counter Traps, passing priority)
-- Battle Phase damage calculation
+- Chain response window (Mirror Force on attacks, Solemn Judgment on summons, etc.)
+- Quick-Play Spells from hand on opponent's turn
+- Continuous / Equip / Field Spell handling (they sit face-up but their effects don't apply)
+- Graveyard target-picker UI (Monster Reborn currently auto-picks the first monster in either GY)
 - Deckbuilder UI + banlist validation
-- Fog of war on opponent's hand/set cards (server currently sends full state)
 - Speed Duels, Tag Duels, AI, anime/game duelist roster, campaign mode
 - Tauri desktop build, Capacitor mobile build
 

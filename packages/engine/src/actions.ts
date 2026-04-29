@@ -15,7 +15,8 @@ export type Action =
   | { kind: "TributeSummon"; player: PlayerId; hand: InstanceId; slot: number; tributes: InstanceId[]; position: Exclude<Position, "FaceDownDEF"> }
   | { kind: "FlipSummon"; player: PlayerId; monster: InstanceId }
   | { kind: "ChangePosition"; player: PlayerId; monster: InstanceId; position: Position }
-  | { kind: "PlaySpell"; player: PlayerId; hand: InstanceId; slot: number; faceDown: boolean }
+  | { kind: "PlaySpell"; player: PlayerId; hand: InstanceId; slot: number; faceDown: boolean; payload?: Record<string, unknown> }
+  | { kind: "ActivateSetSpell"; player: PlayerId; spellTrap: InstanceId; payload?: Record<string, unknown> }
   | { kind: "SetTrap"; player: PlayerId; hand: InstanceId; slot: number }
   | { kind: "ActivateEffect"; player: PlayerId; source: InstanceId; effectKey: string; payload?: Record<string, unknown> }
   | { kind: "DeclareAttack"; player: PlayerId; attacker: InstanceId; target: InstanceId | "direct" }
