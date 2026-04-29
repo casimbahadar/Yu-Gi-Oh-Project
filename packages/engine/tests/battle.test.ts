@@ -7,6 +7,7 @@ import {
   type InstanceId,
 } from "../src/index.js";
 import "../src/cards/index.js";
+import { play } from "./helpers.js";
 
 const DM = 46986414;        // Dark Magician — L7 ATK 2500 / DEF 2100 (Normal)
 const BEWD = 89631139;      // Blue-Eyes — L8 ATK 3000 / DEF 2500
@@ -43,10 +44,11 @@ function setupBothAshOnFieldP1Turn(): Setup {
 
   // Force a known hand so the test is deterministic about which Ash we summon.
   // Easier: we summon whatever Ash is in hand on each player's turn.
+  // Use `play` so the post-summon chain window auto-passes through.
   const summonAsh = (pid: 0 | 1): InstanceId => {
     const handAshId = s.players[pid].hand.find((id) => s.cards[id]?.defId === ASH);
     if (!handAshId) throw new Error("no ash in hand");
-    ({ state: s } = reduce(s, {
+    ({ state: s } = play(s, {
       kind: "NormalSummon",
       player: pid,
       hand: handAshId,
@@ -77,7 +79,7 @@ function setupBothAshOnFieldP1Turn(): Setup {
 }
 
 function step(s: GameState, a: Action): GameState {
-  return reduce(s, a).state;
+  return play(s, a).state;
 }
 
 describe("engine: battle phase", () => {
@@ -150,7 +152,7 @@ describe("engine: battle phase", () => {
     const s = structuredClone(state);
     s.cards[p1Ash]!.defId = BEWD; // 3000 ATK so it survives
     s.cards[p0Ash]!.defId = ASH;  // 0 ATK, will die first
-    const a1 = reduce(s, {
+    const a1 = play(s, {
       kind: "DeclareAttack",
       player: 1,
       attacker: p1Ash,
@@ -159,7 +161,7 @@ describe("engine: battle phase", () => {
     expect(a1.events.some((e) => e.kind === "BattleResolved")).toBe(true);
     // Try a direct attack — opponent now has no monsters but the same
     // attacker has flags.hasAttacked = true.
-    const a2 = reduce(a1.state, {
+    const a2 = play(a1.state, {
       kind: "DeclareAttack",
       player: 1,
       attacker: p1Ash,
@@ -176,7 +178,7 @@ describe("engine: battle phase", () => {
     s.cards[p0Ash]!.location = { controller: 0, zone: "graveyard", index: s.players[0].graveyard.length };
     s.players[0].graveyard.push(p0Ash);
     s.cards[p1Ash]!.defId = BEWD; // 3000 ATK
-    const r = reduce(s, {
+    const r = play(s, {
       kind: "DeclareAttack",
       player: 1,
       attacker: p1Ash,
@@ -238,7 +240,7 @@ describe("engine: battle phase", () => {
     s.cards[p1Ash]!.defId = BEWD;
     s.cards[p0Ash]!.position = "FaceDownDEF";
     s.cards[p0Ash]!.faceUp = false;
-    const r = reduce(s, {
+    const r = play(s, {
       kind: "DeclareAttack",
       player: 1,
       attacker: p1Ash,

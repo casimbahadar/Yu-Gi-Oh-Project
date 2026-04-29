@@ -13,27 +13,29 @@ This repo currently holds the **MVP foundation**: a headless rules engine, a Web
 - Deterministic rules engine: serializable `GameState`, pure reducer, seeded RNG
 - Turn/phase state machine (Draw → Standby → Main1 → Battle → Main2 → End)
 - Normal Summon, Tribute Summon (1- and 2-tribute), Set Monster, Flip Summon
+- **Fusion Summon via Polymerization**, with name-multiset material matching
 - Manual position change (ATK ↔ DEF) with once-per-turn / summon-turn / post-attack guards
 - Set / Play Spell, Set Trap, activate face-down Spells from your field
-- Spell activation pipeline: Pot of Greed (draw 2), Raigeki (board wipe), Monster Reborn (revive from any GY)
+- Spell activation pipeline: Pot of Greed (draw 2), Raigeki (board wipe), Monster Reborn (revive from any GY with a UI graveyard picker)
 - Battle Phase: attack declaration, ATK-vs-ATK / ATK-vs-DEF math, direct attacks, face-down flip-on-attack, per-monster once-per-turn lock
+- **Chain response window** with Spell Speed gating: opens after attack declarations, summons, and spell activations; resolves on two consecutive passes; supports negation (Counter Traps) and link skipping
+- Trap responders wired through the chain: **Mirror Force** (Spell Speed 2) destroys the attacker on declaration, **Solemn Judgment** (Spell Speed 3) negates summons or spells at the cost of half LP
 - Concede, life-points-to-zero victory, deck-out victory
-- Chain / Spell Speed scaffolding with pluggable per-card effect resolvers
 - Server-side fog of war: opponent hand, deck, extra deck, and face-down field cards are redacted before broadcast
 - WebSocket duel server with private room codes
-- React client with: field view, hand actions (Summon ATK / Set Monster / Tribute Summon / Activate / Set), in-slot position-change & flip & activate-set buttons, click-to-attack flow, event log, phase bar
+- **Offline Practice vs AI mode**: in-browser engine instance, no server required, with a heuristic AI driver (legal-action enumerator + scored policy)
+- React client with: field view, hand actions (Summon ATK / Set Monster / Tribute Summon / Activate / Set / Fusion Summon), in-slot position-change & flip & activate-set buttons, click-to-attack flow, chain window banner with Activate / Pass buttons, graveyard picker, fusion picker, event log, phase bar
 - PWA manifest (installable on mobile browsers)
 - YGOPRODeck snapshot CLI (`pnpm cards:refresh`)
-- 23 engine tests covering bootstrap, summons, position changes, flips, spells, and the battle phase
+- 32 engine tests covering bootstrap, summons, position changes, flips, spells, the battle phase, chain windows (Mirror Force + Solemn Judgment), fusion summons, and AI self-play
 
 **Stubbed / not yet implemented**
-- Special Summons (Fusion/Synchro/Xyz/Link/Ritual/Pendulum) — engine accepts the action shape but doesn't yet compute materials or validate procedures
-- Chain response window (Mirror Force on attacks, Solemn Judgment on summons, etc.)
+- Special Summons other than Fusion (Synchro/Xyz/Link/Ritual/Pendulum) — engine accepts the action shape but doesn't yet compute materials or validate procedures
 - Quick-Play Spells from hand on opponent's turn
 - Continuous / Equip / Field Spell handling (they sit face-up but their effects don't apply)
-- Graveyard target-picker UI (Monster Reborn currently auto-picks the first monster in either GY)
+- Hand traps (Ash Blossom etc.) — defined but the responder predicate isn't wired yet
 - Deckbuilder UI + banlist validation
-- Speed Duels, Tag Duels, AI, anime/game duelist roster, campaign mode
+- Speed Duels, Tag Duels, anime/game duelist roster, campaign mode
 - Tauri desktop build, Capacitor mobile build
 
 ## Prerequisites

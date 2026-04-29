@@ -1,5 +1,10 @@
 import type { Action } from "./actions.js";
-import { getActivationEffect, pushLink, resolveChain } from "./chain.js";
+import {
+  getActivationEffect,
+  getResponder,
+  pushLink,
+  resolveChain,
+} from "./chain.js";
 import { nextPhase, battleAllowedOnTurn } from "./phases.js";
 import { mulberry32, shuffleInPlace } from "./rng.js";
 import { requireCard } from "./registry.js";
@@ -9,7 +14,14 @@ import {
   type GameState,
   type PlayerState,
 } from "./state.js";
-import type { CardInstance, GameEvent, InstanceId, MonsterDefinition, PlayerId } from "./types.js";
+import type {
+  CardInstance,
+  ChainTrigger,
+  GameEvent,
+  InstanceId,
+  MonsterDefinition,
+  PlayerId,
+} from "./types.js";
 
 export interface ReduceResult {
   state: GameState;
@@ -25,6 +37,7 @@ export function reduce(state: GameState, action: Action): ReduceResult {
   const s = cloneState(state);
   const events: GameEvent[] = [];
   try {
+    ensureNoOpenChainWindow(s, action);
     apply(s, action, events);
     s.tick += 1;
   } catch (err) {
@@ -76,14 +89,28 @@ function apply(s: GameState, a: Action, ev: GameEvent[]): void {
       return changePosition(s, a.player, a.monster, a.position, ev);
     case "FlipSummon":
       return flipSummon(s, a.player, a.monster, ev);
+    case "ChainRespond":
+      return chainRespond(s, a.player, a.source, a.effectKey, a.payload, ev);
+    case "ChainPass":
+      return chainPass(s, a.player, ev);
+    case "FusionSummon":
+      return fusionSummon(s, a.player, a.polymerization, a.fusionMonster, a.materials, a.slot, a.position, ev);
     // Skeletons — filled in during MVP card work.
     case "ActivateEffect":
     case "SpecialSummon":
-    case "ChainRespond":
-    case "ChainPass":
       ev.push({ kind: "NotImplemented", action: a.kind });
       return;
   }
+}
+
+/**
+ * Reject most actions while a chain window is open. Only ChainRespond,
+ * ChainPass, and Concede are allowed.
+ */
+function ensureNoOpenChainWindow(s: GameState, a: Action): void {
+  if (!s.pendingChainWindow) return;
+  if (a.kind === "ChainRespond" || a.kind === "ChainPass" || a.kind === "Concede") return;
+  throw new Error(`A chain window is open; respond or pass first.`);
 }
 
 function startDuel(
@@ -148,13 +175,17 @@ function advancePhase(s: GameState, ev: GameEvent[]): void {
     const p = s.players[s.turnPlayer];
     p.normalSummonsUsed = 0;
     p.hasDrawnForTurn = false;
-    // Clear per-turn flags on every monster on the field.
+    // Clear per-turn flags on every monster on the field, and let any
+    // Set Spell/Trap become activatable now that a turn has elapsed.
     for (const id of Object.keys(s.cards)) {
       const c = s.cards[id]!;
       if (c.location.zone === "mainMonster" || c.location.zone === "extraMonster") {
         c.flags.hasAttacked = false;
         c.flags.positionChangedThisTurn = false;
         c.flags.summonedThisTurn = false;
+      }
+      if (c.location.zone === "spellTrap") {
+        c.flags.setThisTurn = false;
       }
     }
     ev.push({ kind: "TurnStarted", player: s.turnPlayer, turn: s.turn });
@@ -236,6 +267,15 @@ function normalSummon(
     slot,
     position,
   });
+  // Set Monster (face-down) is not a Summon for chain-trigger purposes.
+  if (position !== "FaceDownDEF") {
+    openChainWindow(s, {
+      kind: "Summoned",
+      summonType: "Normal",
+      player: pid,
+      instanceId: handInstance,
+    }, ev);
+  }
 }
 
 function tributeSummon(
@@ -279,6 +319,12 @@ function tributeSummon(
   card.flags.positionChangedThisTurn = false;
   p.normalSummonsUsed += 1;
   ev.push({ kind: "TributeSummon", player: pid, instanceId: handInstance, slot, position });
+  openChainWindow(s, {
+    kind: "Summoned",
+    summonType: "Tribute",
+    player: pid,
+    instanceId: handInstance,
+  }, ev);
 }
 
 function playSpell(
@@ -316,6 +362,7 @@ function playSpell(
   p.spellTrap[slot] = handInstance;
   card.location = { controller: pid, zone: "spellTrap", index: slot };
   card.faceUp = !faceDown;
+  if (faceDown) card.flags.setThisTurn = true;
   ev.push({
     kind: faceDown ? "CardSet" : "SpellActivated",
     player: pid,
@@ -323,8 +370,8 @@ function playSpell(
     slot,
   });
 
-  // Set cards just sit there. Face-up activations resolve immediately
-  // (no chain-response window in MVP).
+  // Set cards just sit there until activated. Face-up activations open
+  // a chain window via resolveSpellActivation.
   if (faceDown) return;
   resolveSpellActivation(s, pid, handInstance, def, payload, ev);
 }
@@ -356,8 +403,10 @@ function activateSetSpell(
 }
 
 /**
- * Common path: push the spell's bound effect to the chain, resolve,
- * and (for Normal/Ritual Spells) send the spell to the GY afterwards.
+ * Common path: push the spell's bound effect to the chain as link 1,
+ * then open a chain window so the opponent can respond (e.g. Solemn
+ * Judgment to negate). When the window resolves, the spell's effect
+ * runs (unless negated). Normal/Ritual spells go to GY at window close.
  */
 function resolveSpellActivation(
   s: GameState,
@@ -369,16 +418,18 @@ function resolveSpellActivation(
 ): void {
   if (def.cardType !== "Spell") return;
   const effectKey = getActivationEffect(def.id);
-  if (effectKey) {
-    pushLink(s, source, pid, 1, effectKey, payload ?? {});
-    resolveChain(s, ev);
-  } else {
+  if (!effectKey) {
     ev.push({ kind: "EffectFizzled", reason: "no resolver", source, defId: def.id });
+    if (def.kind === "Normal" || def.kind === "Ritual") {
+      sendCardToGraveyard(s, source, ev);
+    }
+    return;
   }
-  // Normal/Ritual Spells go to GY after resolution. Continuous/Field/Equip remain.
-  if (def.kind === "Normal" || def.kind === "Ritual") {
-    sendCardToGraveyard(s, source, ev);
-  }
+  pushLink(s, source, pid, 1, effectKey, payload ?? {});
+  ev.push({ kind: "ChainLinkAdded", source, effectKey, link: s.chain.length });
+  openChainWindow(s, { kind: "SpellActivated", player: pid, source }, ev);
+  // sendCardToGraveyard for Normal/Ritual happens when the window closes
+  // (see closeChainWindow).
 }
 
 function removeFromHand(p: PlayerState, id: InstanceId): void {
@@ -465,10 +516,140 @@ function flipSummon(
   card.flags.positionChangedThisTurn = false;
   card.flags.hasAttacked = false;
   ev.push({ kind: "FlipSummon", player: pid, instanceId: monsterId });
+  openChainWindow(s, {
+    kind: "Summoned",
+    summonType: "Flip",
+    player: pid,
+    instanceId: monsterId,
+  }, ev);
   // Real rules: Flip effects trigger here. None of our MVP cards have one.
 }
 
-/** Send a non-monster card from anywhere to its owner's Graveyard. */
+/**
+ * Polymerization-style Fusion Summon. The Polymerization spell goes to
+ * the GY, the listed materials go to the GY, and the Fusion Monster is
+ * Special Summoned from the Extra Deck face-up to the chosen Main Monster
+ * Zone in the requested position. Opens a chain window for the summon.
+ *
+ * Material matching: name-multiset equality against the Fusion's
+ * `fusionMaterials`. If the Fusion has no listed materials, any 2+
+ * monsters are accepted (a deliberate fallback for the curated cards).
+ */
+function fusionSummon(
+  s: GameState,
+  pid: PlayerId,
+  polymerizationId: InstanceId,
+  fusionMonsterId: InstanceId,
+  materials: InstanceId[],
+  slot: number,
+  position: import("./types.js").Position,
+  ev: GameEvent[],
+): void {
+  if (s.phase !== "Main1" && s.phase !== "Main2") {
+    throw new Error("Fusion Summon only in Main Phase");
+  }
+  if (s.turnPlayer !== pid) throw new Error("Not your turn");
+  const me = s.players[pid];
+  if (slot < 0 || slot >= 5) throw new Error("Invalid slot");
+  if (me.mainMonster[slot] !== null) throw new Error("Monster zone occupied");
+  if (position !== "ATK" && position !== "DEF") {
+    throw new Error("Fusion Summon must be face-up ATK or DEF");
+  }
+
+  // Polymerization must be a Normal Spell in this player's hand or face-down on field.
+  const poly = s.cards[polymerizationId];
+  if (!poly) throw new Error("Polymerization not found");
+  if (poly.controller !== pid) throw new Error("Polymerization isn't yours");
+  const polyDef = requireCard(poly.defId);
+  if (polyDef.cardType !== "Spell" || polyDef.id !== 24094653) {
+    throw new Error("Card provided is not Polymerization");
+  }
+  if (poly.location.zone !== "hand" && poly.location.zone !== "spellTrap") {
+    throw new Error("Polymerization must be in your hand or face-down on the field");
+  }
+
+  // Fusion target must be in this player's extra deck.
+  const fusion = s.cards[fusionMonsterId];
+  if (!fusion) throw new Error("Fusion monster not found");
+  if (fusion.owner !== pid || fusion.location.zone !== "extraDeck") {
+    throw new Error("Fusion monster must be in your Extra Deck");
+  }
+  const fusionDef = requireCard(fusion.defId);
+  if (fusionDef.cardType !== "Monster" || !fusionDef.kinds.includes("Fusion")) {
+    throw new Error("Target is not a Fusion monster");
+  }
+
+  // Validate material count and (if listed) names.
+  if (materials.length < 2) throw new Error("Need at least 2 Fusion Materials");
+  if (fusionDef.fusionMaterials && fusionDef.fusionMaterials.length > 0) {
+    if (materials.length !== fusionDef.fusionMaterials.length) {
+      throw new Error(`Need exactly ${fusionDef.fusionMaterials.length} materials`);
+    }
+    const required = [...fusionDef.fusionMaterials].sort();
+    const actualNames: string[] = [];
+    for (const m of materials) {
+      const card = s.cards[m];
+      if (!card) throw new Error("Unknown material");
+      try { actualNames.push(requireCard(card.defId).name); }
+      catch { throw new Error("Unknown material"); }
+    }
+    actualNames.sort();
+    for (let i = 0; i < required.length; i++) {
+      if (required[i] !== actualNames[i]) {
+        throw new Error(`Material mismatch: need ${required.join(", ")}`);
+      }
+    }
+  }
+
+  // Verify each material is a monster controlled by `pid` and on hand or field.
+  for (const m of materials) {
+    const card = s.cards[m];
+    if (!card) throw new Error("Material missing");
+    if (card.controller !== pid) throw new Error("Material isn't yours");
+    if (card.location.zone !== "hand" && card.location.zone !== "mainMonster") {
+      throw new Error("Materials must be in your hand or on your field");
+    }
+    try {
+      if (requireCard(card.defId).cardType !== "Monster") {
+        throw new Error("Material must be a monster");
+      }
+    } catch {
+      throw new Error("Unknown material");
+    }
+  }
+
+  // Send Polymerization to GY, then materials, then Special Summon Fusion.
+  sendCardToGraveyard(s, polymerizationId, ev);
+  for (const m of materials) sendCardToGraveyard(s, m, ev);
+
+  // Place fusion in main monster zone.
+  const extraIdx = me.extraDeck.indexOf(fusionMonsterId);
+  if (extraIdx >= 0) me.extraDeck.splice(extraIdx, 1);
+  me.mainMonster[slot] = fusionMonsterId;
+  fusion.controller = pid;
+  fusion.location = { controller: pid, zone: "mainMonster", index: slot };
+  fusion.position = position;
+  fusion.faceUp = true;
+  fusion.flags.summonedThisTurn = true;
+  fusion.flags.hasAttacked = false;
+  fusion.flags.positionChangedThisTurn = false;
+  ev.push({
+    kind: "FusionSummon",
+    player: pid,
+    instanceId: fusionMonsterId,
+    materials,
+    slot,
+    position,
+  });
+  openChainWindow(s, {
+    kind: "Summoned",
+    summonType: "Special",
+    player: pid,
+    instanceId: fusionMonsterId,
+  }, ev);
+}
+
+/** Send a card from any zone to its owner's Graveyard (without destroying). */
 function sendCardToGraveyard(
   s: GameState,
   id: InstanceId,
@@ -478,11 +659,17 @@ function sendCardToGraveyard(
   if (!card) return;
   const ctrl = s.players[card.controller];
   const loc = card.location;
-  if (loc.zone === "spellTrap") ctrl.spellTrap[loc.index] = null;
-  else if (loc.zone === "field") ctrl.field = null;
-  else if (loc.zone === "hand") {
-    const i = ctrl.hand.indexOf(id);
-    if (i >= 0) ctrl.hand.splice(i, 1);
+  switch (loc.zone) {
+    case "spellTrap": ctrl.spellTrap[loc.index] = null; break;
+    case "field": ctrl.field = null; break;
+    case "mainMonster": ctrl.mainMonster[loc.index] = null; break;
+    case "extraMonster": s.extraMonsterZones[loc.index] = null; break;
+    case "hand": {
+      const i = ctrl.hand.indexOf(id);
+      if (i >= 0) ctrl.hand.splice(i, 1);
+      break;
+    }
+    default: break;
   }
   card.location = {
     controller: card.owner,
@@ -497,12 +684,9 @@ function sendCardToGraveyard(
 }
 
 /**
- * Declare an attack with `attackerId` against `target`. `target` is
- * either a monster instance id on the opposing field, or "direct" for
- * a direct attack (legal only when the opponent controls no monsters).
- *
- * MVP scope: no chain window for attack response (no Mirror Force yet),
- * no replay step, no piercing/effect damage. Pure ATK/DEF math.
+ * Declare an attack with `attackerId` against `target`. After validation
+ * we open a chain window so the opponent can respond with traps like
+ * Mirror Force. The actual damage step runs when the window resolves.
  */
 function declareAttack(
   s: GameState,
@@ -529,53 +713,106 @@ function declareAttack(
   if (attacker.flags.hasAttacked === true) {
     throw new Error("This monster has already attacked this turn");
   }
-  const attackerDef = monsterDef(attacker.defId);
   const opp = opponentOf(pid);
 
   if (target === "direct") {
     if (opponentHasMonster(s, opp)) {
       throw new Error("Cannot attack directly while opponent controls a monster");
     }
-    attacker.flags.hasAttacked = true;
+  } else {
+    const defender = s.cards[target];
+    if (!defender) throw new Error("Unknown target");
+    if (defender.controller !== opp) throw new Error("Target is not opponent's monster");
+    if (defender.location.zone !== "mainMonster" && defender.location.zone !== "extraMonster") {
+      throw new Error("Target not on the field");
+    }
+  }
+
+  // Attack declaration sticks even if cancelled: this monster has used
+  // its attack for the turn (Yu-Gi-Oh rules — declaration counts).
+  attacker.flags.hasAttacked = true;
+  ev.push({ kind: "AttackDeclared", attacker: attackerId, target, attackingPlayer: pid });
+
+  // Open the chain window. Defending player gets the first chance to
+  // respond. If both pass with no chain links, damage step runs.
+  openChainWindow(s, {
+    kind: "AttackDeclared",
+    attackingPlayer: pid,
+    attacker: attackerId,
+    target,
+  }, ev);
+}
+
+/**
+ * Resolve the deferred damage step from an AttackDeclared chain window
+ * once it closes. Skipped if the trigger was negated (e.g., a Counter
+ * Trap negated the attack) or if the attacker no longer exists / is
+ * no longer in face-up ATK position.
+ */
+function performAttackDamageStep(
+  s: GameState,
+  attackerId: InstanceId,
+  target: InstanceId | "direct",
+  attackingPlayer: PlayerId,
+  ev: GameEvent[],
+): void {
+  const attacker = s.cards[attackerId];
+  if (!attacker) {
+    ev.push({ kind: "AttackFizzled", reason: "attacker missing" });
+    return;
+  }
+  if (
+    attacker.location.zone !== "mainMonster" &&
+    attacker.location.zone !== "extraMonster"
+  ) {
+    ev.push({ kind: "AttackFizzled", reason: "attacker no longer on field" });
+    return;
+  }
+  if (!attacker.faceUp || attacker.position !== "ATK") {
+    ev.push({ kind: "AttackFizzled", reason: "attacker no longer face-up ATK" });
+    return;
+  }
+  const attackerDef = monsterDef(attacker.defId);
+  const opp = opponentOf(attackingPlayer);
+
+  if (target === "direct") {
+    if (opponentHasMonster(s, opp)) {
+      // Opponent summoned a blocker mid-chain — direct attack fizzles.
+      ev.push({ kind: "AttackFizzled", reason: "opponent now has monsters" });
+      return;
+    }
     changeLp(s, opp, -attackerDef.atk, ev);
-    ev.push({
-      kind: "DirectAttack",
-      attacker: attackerId,
-      damage: attackerDef.atk,
-    });
+    ev.push({ kind: "DirectAttack", attacker: attackerId, damage: attackerDef.atk });
     return;
   }
 
   const defender = s.cards[target];
-  if (!defender) throw new Error("Unknown target");
-  if (defender.controller !== opp) throw new Error("Target is not opponent's monster");
-  if (defender.location.zone !== "mainMonster" && defender.location.zone !== "extraMonster") {
-    throw new Error("Target not on the field");
+  if (
+    !defender ||
+    (defender.location.zone !== "mainMonster" && defender.location.zone !== "extraMonster")
+  ) {
+    // Replay step in real rules; MVP just fizzles.
+    ev.push({ kind: "AttackFizzled", reason: "target no longer on field" });
+    return;
   }
   const defenderDef = monsterDef(defender.defId);
 
-  // Face-down defenders flip face-up at the start of damage calculation.
   if (defender.position === "FaceDownDEF") {
     defender.faceUp = true;
     defender.position = "DEF";
     ev.push({ kind: "FlippedFaceUp", instanceId: target });
-    // Real rules: Flip effects trigger here. MVP: no flip effects implemented.
   }
 
-  attacker.flags.hasAttacked = true;
-
   if (defender.position === "ATK") {
-    // ATK vs ATK
     const aATK = attackerDef.atk;
     const dATK = defenderDef.atk;
     if (aATK > dATK) {
       changeLp(s, opp, -(aATK - dATK), ev);
       destroyMonster(s, target, ev);
     } else if (aATK < dATK) {
-      changeLp(s, pid, -(dATK - aATK), ev);
+      changeLp(s, attackingPlayer, -(dATK - aATK), ev);
       destroyMonster(s, attackerId, ev);
     } else {
-      // Equal: both destroyed, no damage.
       destroyMonster(s, attackerId, ev);
       destroyMonster(s, target, ev);
     }
@@ -588,15 +825,13 @@ function declareAttack(
       targetATK: dATK,
     });
   } else {
-    // ATK vs DEF (face-up DEF). No piercing in MVP.
     const aATK = attackerDef.atk;
     const dDEF = defenderDef.def ?? 0;
     if (aATK > dDEF) {
       destroyMonster(s, target, ev);
     } else if (aATK < dDEF) {
-      changeLp(s, pid, -(dDEF - aATK), ev);
+      changeLp(s, attackingPlayer, -(dDEF - aATK), ev);
     }
-    // Equal: nothing happens.
     ev.push({
       kind: "BattleResolved",
       attacker: attackerId,
@@ -605,6 +840,136 @@ function declareAttack(
       attackerATK: aATK,
       targetDEF: dDEF,
     });
+  }
+}
+
+/**
+ * Open a chain window. Defending / non-acting player gets first
+ * priority. The window tracks consecutive passes; two in a row without
+ * an activation in between resolve the chain and execute deferred work.
+ */
+function openChainWindow(s: GameState, trigger: ChainTrigger, ev: GameEvent[]): void {
+  const acting =
+    trigger.kind === "AttackDeclared" ? trigger.attackingPlayer
+    : trigger.kind === "Summoned" ? trigger.player
+    : trigger.player;
+  s.pendingChainWindow = {
+    trigger,
+    priority: opponentOf(acting),
+    consecutivePasses: 0,
+    triggerNegated: false,
+  };
+  ev.push({ kind: "ChainWindowOpened", trigger });
+}
+
+function chainRespond(
+  s: GameState,
+  pid: PlayerId,
+  sourceId: InstanceId,
+  effectKey: string,
+  payload: Record<string, unknown> | undefined,
+  ev: GameEvent[],
+): void {
+  const w = s.pendingChainWindow;
+  if (!w) throw new Error("No chain window is open");
+  if (w.priority !== pid) throw new Error("Not your priority");
+  const card = s.cards[sourceId];
+  if (!card) throw new Error("Unknown source card");
+  if (card.controller !== pid) throw new Error("Not your card");
+  const def = requireCard(card.defId);
+
+  // Validate the responder. Card must be a registered chain responder
+  // and its predicate must accept the current trigger.
+  const reg = getResponder(def.id);
+  if (!reg) throw new Error(`${def.name} is not a chain responder`);
+  if (reg.effectKey !== effectKey) {
+    throw new Error(`Effect key mismatch for ${def.name}`);
+  }
+  if (!reg.canRespond(w.trigger, s, card)) {
+    throw new Error(`${def.name} cannot respond to this trigger`);
+  }
+  // Spell Speed gate vs the current top of chain.
+  const top = s.chain[s.chain.length - 1];
+  if (top && reg.spellSpeed < top.spellSpeed) {
+    throw new Error(`${def.name} (Spell Speed ${reg.spellSpeed}) cannot respond to Spell Speed ${top.spellSpeed}`);
+  }
+  // Traps: must be face-down on field, not just-set this turn.
+  if (def.cardType === "Trap") {
+    if (card.location.zone !== "spellTrap" || card.faceUp) {
+      throw new Error("Trap is not Set on the field");
+    }
+    if (card.flags.setThisTurn === true && reg.ignoreSetThisTurn !== true) {
+      throw new Error("Cannot activate a Trap the turn it was Set");
+    }
+    card.faceUp = true;
+    ev.push({ kind: "TrapActivated", instanceId: sourceId, player: pid });
+  }
+
+  if (reg.onActivate) reg.onActivate(s, card, ev);
+  pushLink(s, sourceId, pid, reg.spellSpeed, effectKey, payload ?? {});
+  ev.push({ kind: "ChainLinkAdded", source: sourceId, effectKey, link: s.chain.length });
+
+  w.consecutivePasses = 0;
+  w.priority = opponentOf(pid);
+}
+
+function chainPass(s: GameState, pid: PlayerId, ev: GameEvent[]): void {
+  const w = s.pendingChainWindow;
+  if (!w) throw new Error("No chain window is open");
+  if (w.priority !== pid) throw new Error("Not your priority");
+  w.consecutivePasses += 1;
+  ev.push({ kind: "ChainPass", player: pid });
+
+  if (w.consecutivePasses >= 2) {
+    // Both players passed → resolve the chain, then handle deferred work.
+    closeChainWindow(s, ev);
+  } else {
+    w.priority = opponentOf(pid);
+  }
+}
+
+/** Resolve any chain links and perform the deferred trigger action. */
+function closeChainWindow(s: GameState, ev: GameEvent[]): void {
+  const w = s.pendingChainWindow;
+  if (!w) return;
+  resolveChain(s, ev);
+  const trigger = w.trigger;
+  const negated = w.triggerNegated;
+  s.pendingChainWindow = null;
+  ev.push({ kind: "ChainWindowClosed", negated });
+
+  switch (trigger.kind) {
+    case "AttackDeclared":
+      // Skip the damage step if the attack was negated by a Counter Trap.
+      if (!negated) {
+        performAttackDamageStep(
+          s,
+          trigger.attacker,
+          trigger.target,
+          trigger.attackingPlayer,
+          ev,
+        );
+      }
+      return;
+    case "Summoned":
+      // The summon already happened. If it had been negated, the
+      // negating effect (e.g., Solemn Judgment) destroyed the monster.
+      // Nothing else to do here.
+      return;
+    case "SpellActivated": {
+      // Send Normal/Ritual Spells to the GY whether or not the activation
+      // was negated. Continuous/Field/Equip remain face-up on the field.
+      const card = s.cards[trigger.source];
+      if (card) {
+        try {
+          const def = requireCard(card.defId);
+          if (def.cardType === "Spell" && (def.kind === "Normal" || def.kind === "Ritual")) {
+            sendCardToGraveyard(s, trigger.source, ev);
+          }
+        } catch { /* unknown */ }
+      }
+      return;
+    }
   }
 }
 

@@ -6,7 +6,7 @@ import {
   type GameState,
 } from "../src/index.js";
 import "../src/cards/index.js";
-import { plantInHand } from "./helpers.js";
+import { plantInHand, play } from "./helpers.js";
 
 const POT = 53129443;
 const RAIGEKI = 12580477;
@@ -27,6 +27,10 @@ function step(s: GameState, a: Action): GameState {
   return reduce(s, a).state;
 }
 
+function stepFlush(s: GameState, a: Action): GameState {
+  return play(s, a).state;
+}
+
 function intoMain1OnTurn1(): GameState {
   let s = createInitialState(11, "A", "B");
   ({ state: s } = reduce(s, { kind: "StartDuel", decks: { p0: deck(), p1: deck() }, goingFirst: 0 }));
@@ -40,8 +44,9 @@ describe("engine: spell activation", () => {
     let s = intoMain1OnTurn1();
     const pot = plantInHand(s, POT, 0);
     const handBefore = s.players[0].hand.length;
-    const r = reduce(s, { kind: "PlaySpell", player: 0, hand: pot, slot: 0, faceDown: false });
+    const r = play(s, { kind: "PlaySpell", player: 0, hand: pot, slot: 0, faceDown: false });
     s = r.state;
+    // -1 (the spell left hand) + 2 (drawn) = +1
     expect(s.players[0].hand.length).toBe(handBefore + 1);
     expect(s.cards[pot]!.location.zone).toBe("graveyard");
     expect(r.events.some((e) => e.kind === "SpellActivated")).toBe(true);
@@ -59,10 +64,10 @@ describe("engine: spell activation", () => {
     s.cards[oppMonsterId]!.faceUp = true;
 
     const myMonsterId = plantInHand(s, GEMINI, 0);
-    s = step(s, { kind: "NormalSummon", player: 0, hand: myMonsterId, slot: 1, position: "ATK" });
+    s = stepFlush(s, { kind: "NormalSummon", player: 0, hand: myMonsterId, slot: 1, position: "ATK" });
 
     const raigeki = plantInHand(s, RAIGEKI, 0);
-    s = step(s, { kind: "PlaySpell", player: 0, hand: raigeki, slot: 0, faceDown: false });
+    s = stepFlush(s, { kind: "PlaySpell", player: 0, hand: raigeki, slot: 0, faceDown: false });
 
     expect(s.cards[oppMonsterId]!.location.zone).toBe("graveyard");
     expect(s.cards[myMonsterId]!.location.zone).toBe("mainMonster");
@@ -84,7 +89,7 @@ describe("engine: spell activation", () => {
     s = step(s, { kind: "PlaySpell", player: 0, hand: pot, slot: 0, faceDown: true });
     expect(s.cards[pot]!.faceUp).toBe(false);
     const handBefore = s.players[0].hand.length;
-    s = step(s, { kind: "ActivateSetSpell", player: 0, spellTrap: pot });
+    s = stepFlush(s, { kind: "ActivateSetSpell", player: 0, spellTrap: pot });
     expect(s.players[0].hand.length).toBe(handBefore + 2);
     expect(s.cards[pot]!.location.zone).toBe("graveyard");
   });
@@ -92,14 +97,14 @@ describe("engine: spell activation", () => {
   it("Monster Reborn revives a monster from your graveyard onto your field face-up ATK", () => {
     let s = intoMain1OnTurn1();
     const gem = plantInHand(s, GEMINI, 0);
-    s = step(s, { kind: "NormalSummon", player: 0, hand: gem, slot: 0, position: "ATK" });
+    s = stepFlush(s, { kind: "NormalSummon", player: 0, hand: gem, slot: 0, position: "ATK" });
     // Force into graveyard.
     s.players[0].mainMonster[0] = null;
     s.cards[gem]!.location = { controller: 0, zone: "graveyard", index: s.players[0].graveyard.length };
     s.players[0].graveyard.push(gem);
 
     const reborn = plantInHand(s, REBORN, 0);
-    const r = reduce(s, {
+    const r = play(s, {
       kind: "PlaySpell",
       player: 0,
       hand: reborn,

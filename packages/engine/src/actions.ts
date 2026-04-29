@@ -21,6 +21,21 @@ export type Action =
   | { kind: "ActivateEffect"; player: PlayerId; source: InstanceId; effectKey: string; payload?: Record<string, unknown> }
   | { kind: "DeclareAttack"; player: PlayerId; attacker: InstanceId; target: InstanceId | "direct" }
   | { kind: "SpecialSummon"; player: PlayerId; source: InstanceId; targetZone: "mainMonster" | "extraMonster"; slot: number; position: Position }
+  | {
+      /**
+       * Fusion Summon via Polymerization (or another Fusion-capable spell).
+       * `polymerization` is the Spell card in the player's hand or face-down
+       * field. `fusionMonster` is the target Fusion monster in the player's
+       * Extra Deck. `materials` are field/hand monsters consumed to summon it.
+       */
+      kind: "FusionSummon";
+      player: PlayerId;
+      polymerization: InstanceId;
+      fusionMonster: InstanceId;
+      materials: InstanceId[];
+      slot: number;
+      position: Position;
+    }
   | { kind: "ChainRespond"; player: PlayerId; source: InstanceId; effectKey: string; payload?: Record<string, unknown> }
   | { kind: "ChainPass"; player: PlayerId }
   | { kind: "ResolveChain" }

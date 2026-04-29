@@ -1,6 +1,7 @@
 import type {
   CardInstance,
   ChainLink,
+  ChainWindow,
   InstanceId,
   Phase,
   PlayerId,
@@ -54,6 +55,13 @@ export interface GameState {
   /** Active chain; empty when nothing is resolving. */
   chain: ChainLink[];
 
+  /**
+   * Active chain-resolution window, if one is open. While non-null,
+   * the reducer rejects most actions other than ChainRespond / ChainPass
+   * / Concede. Closed by two consecutive passes.
+   */
+  pendingChainWindow: ChainWindow | null;
+
   /** Once-per-duel / once-per-turn ledger keyed by (instanceId, key). */
   activationLedger: Record<string, number>;
 
@@ -97,6 +105,7 @@ export function createInitialState(
     cards: {},
     extraMonsterZones: [null, null],
     chain: [],
+    pendingChainWindow: null,
     activationLedger: {},
     winner: null,
     ended: false,

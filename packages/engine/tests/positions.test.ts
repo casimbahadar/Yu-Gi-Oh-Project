@@ -7,6 +7,7 @@ import {
   type InstanceId,
 } from "../src/index.js";
 import "../src/cards/index.js";
+import { play } from "./helpers.js";
 
 const GEMINI = 69140098;
 const ASH = 14558127;
@@ -20,8 +21,10 @@ function deck(): number[] {
   return out.slice(0, 40);
 }
 
+// `step` here flushes any chain windows the action opens (auto-pass for both players).
+// Used pervasively because every Normal/Tribute/Flip Summon now opens a window.
 function step(s: GameState, a: Action): GameState {
-  return reduce(s, a).state;
+  return play(s, a).state;
 }
 
 function findHand(s: GameState, defId: number, pid: 0 | 1 = 0): InstanceId {

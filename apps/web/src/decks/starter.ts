@@ -16,6 +16,7 @@ const REBORN = 83764718;
 const RAIGEKI = 12580477;
 const MIRROR = 44095762;
 const SOLEMN = 41420027;
+const POLY = 24094653;
 
 // Extra deck (Fusion/Synchro/Xyz/Link) — kept on bench for future Special Summons.
 const BEUD = 23995346;
@@ -27,32 +28,30 @@ export const starterMain: number[] = [
   // Level-4 beaters
   GEMINI, GEMINI, GEMINI,
   GOBLIN, GOBLIN, GOBLIN,
-  MYSTICAL, MYSTICAL,
+  MYSTICAL, MYSTICAL, MYSTICAL,
   // Higher-level (need tribute)
   DM, DM,
   SKULL, SKULL,
-  BEWD,
-  // Hand traps
+  // 3 Blue-Eyes for the Polymerization → Blue-Eyes Ultimate Dragon line
+  BEWD, BEWD, BEWD,
+  // Hand traps (placeholder until effect-script wiring lands)
   ASH, ASH, ASH,
   // Spells
   POT, POT,
   REBORN,
   RAIGEKI,
-  // Traps (Set only — chain-window UI not in MVP)
+  POLY, POLY,
+  // Traps
   MIRROR, MIRROR,
   SOLEMN,
-  // Filler — we want exactly 40, so pad with a flexible Level-4 Normal.
+  // Filler — pad to exactly 40 with cheap normals.
   GEMINI, GEMINI,
   GOBLIN, GOBLIN,
   MYSTICAL, MYSTICAL,
   ASH, ASH,
   POT,
   MIRROR,
-  // Top up
-  GEMINI, GEMINI,
-  GOBLIN,
-  ASH, ASH,
-  MYSTICAL, MYSTICAL,
+  GEMINI, GOBLIN,
 ];
 
 export const starterExtra: number[] = [

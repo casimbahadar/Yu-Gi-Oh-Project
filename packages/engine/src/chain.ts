@@ -1,4 +1,12 @@
-import type { ChainLink, GameEvent, InstanceId, PlayerId, SpellSpeed } from "./types.js";
+import type {
+  CardInstance,
+  ChainLink,
+  ChainTrigger,
+  GameEvent,
+  InstanceId,
+  PlayerId,
+  SpellSpeed,
+} from "./types.js";
 import type { GameState } from "./state.js";
 
 /**
@@ -50,6 +58,14 @@ export function resolveChain(
 ): void {
   while (state.chain.length > 0) {
     const link = state.chain.pop()!;
+    if (link.negated) {
+      events.push({
+        kind: "LinkNegated",
+        effectKey: link.effectKey,
+        source: link.source,
+      });
+      continue;
+    }
     const resolver = resolvers.get(link.effectKey);
     if (!resolver) {
       events.push({
@@ -94,4 +110,69 @@ export function bindActivation(defId: number, effectKey: string): void {
 
 export function getActivationEffect(defId: number): string | undefined {
   return activationByDefId.get(defId);
+}
+
+/**
+ * A Trap or quick-effect monster's ability to respond to a trigger
+ * (someone attacked, summoned, or activated a Spell). Card scripts
+ * register these so the UI knows what's activatable in any chain window.
+ */
+export interface ChainResponderRegistration {
+  effectKey: string;
+  spellSpeed: SpellSpeed;
+  /** True if this card can activate against the current trigger. */
+  canRespond: (trigger: ChainTrigger, state: GameState, source: CardInstance) => boolean;
+  /**
+   * Optional cost paid at activation time (e.g., Solemn Judgment's
+   * pay-half-LP). Runs whether or not the link is later negated.
+   */
+  onActivate?: (state: GameState, source: CardInstance, events: GameEvent[]) => void;
+  /**
+   * Optional: extra constraint for face-down Traps about being on the
+   * field for at least one full turn ("set this turn" rule). The reducer
+   * already enforces the standard rule; predicate-level overrides here.
+   */
+  ignoreSetThisTurn?: boolean;
+}
+
+const respondersByDefId = new Map<number, ChainResponderRegistration>();
+
+export function registerResponder(defId: number, reg: ChainResponderRegistration): void {
+  if (respondersByDefId.has(defId)) {
+    throw new Error(`Responder already registered for card ${defId}`);
+  }
+  respondersByDefId.set(defId, reg);
+}
+
+export function getResponder(defId: number): ChainResponderRegistration | undefined {
+  return respondersByDefId.get(defId);
+}
+
+/**
+ * Enumerate every face-down trap (and other card type) in `pid`'s
+ * spell/trap zone and hand whose registered responder accepts the
+ * current chain trigger. Used by the UI to populate the chain-window
+ * modal, and by the AI to know whether it has any meaningful response.
+ */
+export function findActivatableResponders(
+  state: GameState,
+  pid: PlayerId,
+  trigger: ChainTrigger,
+): { source: CardInstance; reg: ChainResponderRegistration }[] {
+  const out: { source: CardInstance; reg: ChainResponderRegistration }[] = [];
+  for (const id of state.players[pid].spellTrap) {
+    if (!id) continue;
+    const card = state.cards[id];
+    if (!card || card.faceUp) continue;
+    if (card.flags.setThisTurn === true) continue;
+    const reg = respondersByDefId.get(card.defId);
+    if (!reg) continue;
+    if (!reg.canRespond(trigger, state, card)) continue;
+    const top = state.chain[state.chain.length - 1];
+    if (top && reg.spellSpeed < top.spellSpeed) continue;
+    out.push({ source: card, reg });
+  }
+  // Hand responders (e.g. Ash Blossom) — none in the MVP card set yet,
+  // but the structure stays here for when they're added.
+  return out;
 }

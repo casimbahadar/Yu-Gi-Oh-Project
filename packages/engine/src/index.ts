@@ -6,3 +6,4 @@ export * from "./chain.js";
 export * from "./reducer.js";
 export * from "./registry.js";
 export { mulberry32, shuffleInPlace } from "./rng.js";
+export { legalActions, pickAction, describeAction } from "./ai/index.js";

@@ -78,6 +78,12 @@ export interface MonsterDefinition {
   pendulumScale?: number;
   text: string;
   archetype?: string;
+  /**
+   * For Fusion monsters: ordered list of required material card names.
+   * Materials must match by name (multiset equality). When omitted, any
+   * 2+ monsters are accepted (a deliberately loose MVP fallback).
+   */
+  fusionMaterials?: string[];
 }
 
 export interface SpellDefinition {
@@ -143,6 +149,50 @@ export interface ChainLink {
   effectKey: string;
   /** Targets / choices captured at activation time (pre-resolution). */
   payload: Record<string, unknown>;
+  /** Set true by negation effects. The resolver skips negated links. */
+  negated?: boolean;
+}
+
+/**
+ * What opened the current chain window. Used by responder predicates
+ * to decide whether they can activate, and by the reducer to know what
+ * deferred work to perform when the chain finishes resolving.
+ */
+export type ChainTrigger =
+  | {
+      kind: "AttackDeclared";
+      attackingPlayer: PlayerId;
+      attacker: InstanceId;
+      target: InstanceId | "direct";
+    }
+  | {
+      kind: "Summoned";
+      summonType: "Normal" | "Tribute" | "Flip" | "Special";
+      player: PlayerId;
+      instanceId: InstanceId;
+    }
+  | {
+      kind: "SpellActivated";
+      player: PlayerId;
+      source: InstanceId;
+    };
+
+/**
+ * Open chain-resolution window. While a window is active, both players
+ * may push response links via ChainRespond, or pass via ChainPass. Two
+ * consecutive passes resolve the chain and trigger any deferred action.
+ */
+export interface ChainWindow {
+  trigger: ChainTrigger;
+  /** Player whose turn it is to respond or pass. */
+  priority: PlayerId;
+  /** Number of consecutive passes since the last activation. */
+  consecutivePasses: number;
+  /**
+   * Marks the original trigger as negated by a Counter Trap or similar.
+   * Set true by negation effect resolvers; checked when the window closes.
+   */
+  triggerNegated: boolean;
 }
 
 export interface GameEvent {

@@ -7,7 +7,11 @@
  * can use the same numeric keys without migration.
  */
 
-import { bindActivation, registerEffect } from "../chain.js";
+import {
+  bindActivation,
+  registerEffect,
+  registerResponder,
+} from "../chain.js";
 import { draw, destroy, changeLifePoints } from "../effects/primitives.js";
 import { registerMany } from "../registry.js";
 import type { CardDefinition, InstanceId, PlayerId } from "../types.js";
@@ -127,6 +131,11 @@ const cards: CardDefinition[] = [
     atk: 4500,
     def: 3800,
     text: "3 Blue-Eyes White Dragon.",
+    fusionMaterials: [
+      "Blue-Eyes White Dragon",
+      "Blue-Eyes White Dragon",
+      "Blue-Eyes White Dragon",
+    ],
   },
 
   // --- Synchro ---
@@ -208,6 +217,13 @@ const cards: CardDefinition[] = [
     kind: "Normal",
     text: "Draw 2 cards.",
   },
+  {
+    id: 24094653,
+    name: "Polymerization",
+    cardType: "Spell",
+    kind: "Normal",
+    text: "Fusion Summon 1 Fusion Monster from your Extra Deck, using monsters from your hand or field as Fusion Material.",
+  },
 
   // --- Traps ---
   {
@@ -285,13 +301,64 @@ registerEffect("spell:monster-reborn:revive", (state, link, events) => {
 });
 bindActivation(83764718, "spell:monster-reborn:revive");
 
-// Solemn Judgment: pay half LP; negate. Negation is done by the chain
-// resolver flagging the target link's effectKey — stubbed here as LP pay.
-registerEffect("trap:solemn-judgment:negate", (state, link, events) => {
-  const pid = link.controller;
-  const cost = Math.ceil(state.players[pid].lifePoints / 2);
-  changeLifePoints(state, pid, -cost, events);
-  events.push({ kind: "Negated", by: link.source, target: link.payload.target });
+// Solemn Judgment: Counter Trap (Spell Speed 3). Activatable in response
+// to a Normal/Tribute Summon or a Spell/Trap activation. Cost: pay half
+// your LP at activation. Effect: negate the trigger and, if it was a
+// summon, destroy the summoned monster; if it was a spell, the spell's
+// link is marked negated so its effect won't run.
+registerEffect("trap:solemn-judgment:resolve", (state, link, events) => {
+  const w = state.pendingChainWindow;
+  if (!w) return;
+  w.triggerNegated = true;
+  events.push({ kind: "Negated", by: link.source, trigger: w.trigger.kind });
+  if (w.trigger.kind === "Summoned") {
+    // Destroy the summoned monster.
+    const targetId = w.trigger.instanceId;
+    destroy(state, targetId, events);
+  } else if (w.trigger.kind === "SpellActivated") {
+    // The spell's link sits below us in the chain. Mark it negated.
+    const linkBelow = state.chain[state.chain.length - 1];
+    if (linkBelow) linkBelow.negated = true;
+  }
+});
+registerResponder(41420027, {
+  effectKey: "trap:solemn-judgment:resolve",
+  spellSpeed: 3,
+  canRespond: (trigger) =>
+    trigger.kind === "Summoned" || trigger.kind === "SpellActivated",
+  onActivate: (state, source, events) => {
+    const pid = source.controller;
+    const cost = Math.ceil(state.players[pid].lifePoints / 2);
+    changeLifePoints(state, pid, -cost, events);
+    events.push({ kind: "PaidCost", source: source.instanceId, cost });
+  },
+});
+
+// Mirror Force: Trap (Spell Speed 2). Activatable in response to an
+// attack declaration. Effect: destroy every attack-position monster
+// the attacking player controls (including the attacker).
+registerEffect("trap:mirror-force:resolve", (state, link, events) => {
+  const w = state.pendingChainWindow;
+  if (!w || w.trigger.kind !== "AttackDeclared") return;
+  const attackingPlayer = w.trigger.attackingPlayer;
+  const candidates: InstanceId[] = [
+    ...state.players[attackingPlayer].mainMonster.filter((x): x is InstanceId => x !== null),
+    ...state.extraMonsterZones.filter(
+      (x): x is InstanceId =>
+        x !== null && state.cards[x]?.controller === attackingPlayer,
+    ),
+  ];
+  for (const id of candidates) {
+    const c = state.cards[id];
+    if (c?.position === "ATK" && c.faceUp) destroy(state, id, events);
+  }
+});
+registerResponder(44095762, {
+  effectKey: "trap:mirror-force:resolve",
+  spellSpeed: 2,
+  canRespond: (trigger, _state, source) =>
+    trigger.kind === "AttackDeclared" &&
+    trigger.attackingPlayer !== source.controller,
 });
 
 export { cards as SAMPLE_CARDS };

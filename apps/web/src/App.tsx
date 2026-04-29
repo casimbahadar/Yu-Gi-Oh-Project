@@ -2,11 +2,13 @@ import { useEffect, useState } from "react";
 import "@ygo/engine/cards"; // register sample cards so the client can render names
 import { useDuel } from "./store.js";
 import { connect, send } from "./net/ws-client.js";
+import { ChainWindow } from "./components/ChainWindow.js";
 import { Field } from "./components/Field.js";
 import { Hand } from "./components/Hand.js";
 import { PhaseBar } from "./components/PhaseBar.js";
 import { EventLog } from "./components/EventLog.js";
 import { starterDeck } from "./decks/starter.js";
+import { startPracticeMatch } from "./practice/practice-mode.js";
 
 const DEFAULT_WS = (import.meta as unknown as { env: Record<string, string> }).env
   .VITE_WS_URL ?? "ws://localhost:8787";
@@ -42,6 +44,12 @@ export function App(): JSX.Element {
             />
           </label>
           <button
+            onClick={() => startPracticeMatch(name, starterDeck)}
+            style={{ background: "#3a8a5a", borderColor: "#5fbf85" }}
+          >
+            Practice vs AI (offline)
+          </button>
+          <button
             onClick={() => {
               send({ type: "hello", displayName: name });
               send({ type: "createRoom", deck: starterDeck });
@@ -71,6 +79,7 @@ export function App(): JSX.Element {
       {view === "duel" && state && you !== null && (
         <>
           <PhaseBar state={state} you={you} />
+          <ChainWindow state={state} you={you} />
           <Field state={state} you={you} />
           <Hand state={state} you={you} />
           <EventLog events={events} />
