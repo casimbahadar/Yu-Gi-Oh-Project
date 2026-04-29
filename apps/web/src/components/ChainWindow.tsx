@@ -1,4 +1,5 @@
-import type { GameState, PlayerId } from "@ygo/engine";
+import { useState } from "react";
+import type { GameState, InstanceId, PlayerId } from "@ygo/engine";
 import { findActivatableResponders, requireCard } from "@ygo/engine";
 import { send } from "../net/ws-client.js";
 
@@ -43,9 +44,21 @@ function safeName(defId: number): string {
 
 export function ChainWindow({ state, you }: Props): JSX.Element | null {
   const w = state.pendingChainWindow;
+  // Hooks must run unconditionally — keep state at the top, render null below.
+  const [pendingMstFor, setPendingMstFor] = useState<InstanceId | null>(null);
   if (!w) return null;
   const myTurnInWindow = w.priority === you;
   const responders = myTurnInWindow ? findActivatableResponders(state, you, w.trigger) : [];
+  const opp = (1 - you) as PlayerId;
+
+  // MST target picker — face-up Spell/Trap of the opponent.
+  const mstTargets: InstanceId[] = [];
+  for (const id of state.players[opp].spellTrap) {
+    if (!id) continue;
+    const c = state.cards[id];
+    if (!c || !c.faceUp) continue;
+    mstTargets.push(id);
+  }
 
   return (
     <div
@@ -66,7 +79,7 @@ export function ChainWindow({ state, you }: Props): JSX.Element | null {
       </div>
       <div style={{ marginBottom: 8, fontSize: 13 }}>{describeTrigger(state, w)}</div>
       {!myTurnInWindow && <div style={{ opacity: 0.6 }}>Waiting on opponent…</div>}
-      {myTurnInWindow && (
+      {myTurnInWindow && !pendingMstFor && (
         <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", alignItems: "center" }}>
           {responders.length === 0 ? (
             <span style={{ opacity: 0.7 }}>Nothing to activate.</span>
@@ -74,7 +87,12 @@ export function ChainWindow({ state, you }: Props): JSX.Element | null {
             responders.map(({ source, reg }) => (
               <button
                 key={source.instanceId}
-                onClick={() =>
+                onClick={() => {
+                  // MST needs a target — open inline picker before submit.
+                  if (source.defId === 5318639 /* MST */) {
+                    setPendingMstFor(source.instanceId);
+                    return;
+                  }
                   send({
                     type: "submitAction",
                     action: {
@@ -83,8 +101,8 @@ export function ChainWindow({ state, you }: Props): JSX.Element | null {
                       source: source.instanceId,
                       effectKey: reg.effectKey,
                     },
-                  })
-                }
+                  });
+                }}
                 title={safeName(source.defId)}
               >
                 Activate {safeName(source.defId)}
@@ -98,6 +116,31 @@ export function ChainWindow({ state, you }: Props): JSX.Element | null {
           >
             Pass
           </button>
+        </div>
+      )}
+      {pendingMstFor && (
+        <div style={{ display: "flex", gap: ".5rem", flexWrap: "wrap", alignItems: "center" }}>
+          <span>MST target:</span>
+          {mstTargets.length === 0 && <span style={{ opacity: 0.6 }}>(no face-up Spells/Traps to destroy)</span>}
+          {mstTargets.map((tid) => (
+            <button
+              key={tid}
+              onClick={() => {
+                send({
+                  type: "submitAction",
+                  action: {
+                    kind: "ChainRespond",
+                    player: you,
+                    source: pendingMstFor,
+                    effectKey: "spell:mst:destroy-st",
+                    payload: { target: tid },
+                  },
+                });
+                setPendingMstFor(null);
+              }}
+            >{safeName(state.cards[tid]?.defId ?? -1)}</button>
+          ))}
+          <button onClick={() => setPendingMstFor(null)}>Cancel</button>
         </div>
       )}
     </div>

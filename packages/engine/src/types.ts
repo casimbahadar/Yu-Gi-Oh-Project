@@ -84,6 +84,18 @@ export interface MonsterDefinition {
    * 2+ monsters are accepted (a deliberately loose MVP fallback).
    */
   fusionMaterials?: string[];
+  /** Tuner sub-type — required when summoning Synchro monsters. */
+  isTuner?: boolean;
+  /**
+   * The Ritual Spell card name that summons this Ritual Monster.
+   * Required for Ritual Summon validation.
+   */
+  ritualSpell?: string;
+  /**
+   * For Pendulum monsters: high (right) and low (left) scale values.
+   * Determines what levels can be Pendulum Summoned between them.
+   */
+  pendulumScaleRight?: number;
 }
 
 export interface SpellDefinition {
@@ -126,6 +138,12 @@ export interface CardInstance {
   attached: InstanceId[];
   // Effect runtime flags (summoning sickness, once-per-turn locks, etc.)
   flags: Record<string, boolean | number | string>;
+  /** Equipped Spell instance ids attached to this monster. */
+  equipped?: InstanceId[];
+  /** Live ATK delta from Equip Spells / continuous effects. */
+  atkBonus?: number;
+  /** Live DEF delta from Equip Spells / continuous effects. */
+  defBonus?: number;
 }
 
 export type Phase =

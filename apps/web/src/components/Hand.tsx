@@ -25,6 +25,8 @@ type PendingFusion = {
   selected: InstanceId[];
 };
 
+type PendingEquip = { spellId: InstanceId };
+
 function firstFreeMonsterSlot(state: GameState, pid: PlayerId): number {
   return state.players[pid].mainMonster.findIndex((s) => s === null);
 }
@@ -42,6 +44,7 @@ export function Hand({ state, you }: Props): JSX.Element {
   const [pendingTribute, setPendingTribute] = useState<PendingTribute | null>(null);
   const [pendingReborn, setPendingReborn] = useState<PendingReborn | null>(null);
   const [pendingFusion, setPendingFusion] = useState<PendingFusion | null>(null);
+  const [pendingEquip, setPendingEquip] = useState<PendingEquip | null>(null);
 
   const submitTribute = (handId: InstanceId, position: "ATK" | "DEF"): void => {
     if (!pendingTribute) return;
@@ -118,6 +121,8 @@ export function Hand({ state, you }: Props): JSX.Element {
                 return def.cardType === "Monster" && def.kinds.includes("Fusion");
               } catch { return false; }
             });
+          const isEquipSpell = cardType === "Spell" && spellKind === "Equip";
+          const canEquip = yourTurn && inMain && isEquipSpell;
 
           return (
             <div key={id} className="slot filled" style={{ minWidth: 110, display: "flex", flexDirection: "column", gap: 4 }}>
@@ -200,6 +205,9 @@ export function Hand({ state, you }: Props): JSX.Element {
                   }
                 >Fusion Summon</button>
               )}
+              {canEquip && (
+                <button onClick={() => setPendingEquip({ spellId: id })}>Equip…</button>
+              )}
             </div>
           );
         })}
@@ -247,6 +255,27 @@ export function Hand({ state, you }: Props): JSX.Element {
         />
       )}
 
+      {pendingEquip && (
+        <EquipPicker
+          state={state}
+          you={you}
+          spellId={pendingEquip.spellId}
+          onPick={(targetId) => {
+            send({
+              type: "submitAction",
+              action: {
+                kind: "EquipSpell",
+                player: you,
+                spell: pendingEquip.spellId,
+                target: targetId,
+              },
+            });
+            setPendingEquip(null);
+          }}
+          onCancel={() => setPendingEquip(null)}
+        />
+      )}
+
       {pendingFusion && (
         <FusionPicker
           state={state}
@@ -277,6 +306,66 @@ export function Hand({ state, you }: Props): JSX.Element {
           onCancel={() => setPendingFusion(null)}
         />
       )}
+    </div>
+  );
+}
+
+function EquipPicker({
+  state, you, spellId, onPick, onCancel,
+}: {
+  state: GameState;
+  you: PlayerId;
+  spellId: InstanceId;
+  onPick: (targetId: InstanceId) => void;
+  onCancel: () => void;
+}): JSX.Element {
+  void spellId; // currently we equip to any face-up monster, no per-spell filter
+  const candidates: { id: InstanceId; controller: PlayerId }[] = [];
+  for (const pid of [you, (1 - you) as PlayerId]) {
+    for (const id of state.players[pid].mainMonster) {
+      if (!id) continue;
+      const c = state.cards[id];
+      if (!c || !c.faceUp) continue;
+      candidates.push({ id, controller: pid });
+    }
+    for (const id of state.extraMonsterZones) {
+      if (!id) continue;
+      const c = state.cards[id];
+      if (!c || !c.faceUp) continue;
+      if (c.controller === pid) candidates.push({ id, controller: pid });
+    }
+  }
+  return (
+    <div className="panel" style={{ marginTop: ".5rem", borderColor: "#e9c46a" }}>
+      <div style={{ marginBottom: ".5rem", fontWeight: 600 }}>Equip target</div>
+      {candidates.length === 0 && <div style={{ opacity: 0.6 }}>No face-up monsters on the field.</div>}
+      <div className="hand">
+        {candidates.map(({ id, controller }) => {
+          const c = state.cards[id]!;
+          let name = `#${c.defId}`;
+          let stats = "";
+          try {
+            const def = requireCard(c.defId);
+            name = def.name;
+            if (def.cardType === "Monster") stats = `${def.atk + (c.atkBonus ?? 0)}/${(def.def ?? 0) + (c.defBonus ?? 0)}`;
+          } catch { /* */ }
+          return (
+            <div
+              key={id}
+              className="slot filled selectable"
+              style={{ cursor: "pointer", minWidth: 110 }}
+              onClick={() => onPick(id)}
+            >
+              <small style={{ fontWeight: 600 }}>{name}</small>
+              <small style={{ opacity: 0.6 }}>{stats}</small>
+              <small style={{ opacity: 0.5, fontSize: 10 }}>{controller === you ? "yours" : "opponent"}</small>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ display: "flex", gap: ".5rem", marginTop: ".5rem" }}>
+        <button onClick={onCancel}>Cancel</button>
+      </div>
     </div>
   );
 }

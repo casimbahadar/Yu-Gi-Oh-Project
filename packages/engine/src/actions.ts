@@ -24,9 +24,6 @@ export type Action =
   | {
       /**
        * Fusion Summon via Polymerization (or another Fusion-capable spell).
-       * `polymerization` is the Spell card in the player's hand or face-down
-       * field. `fusionMonster` is the target Fusion monster in the player's
-       * Extra Deck. `materials` are field/hand monsters consumed to summon it.
        */
       kind: "FusionSummon";
       player: PlayerId;
@@ -36,6 +33,79 @@ export type Action =
       slot: number;
       position: Position;
     }
+  | {
+      /**
+       * Synchro Summon: 1 Tuner + 1+ non-Tuners whose levels sum to the
+       * Synchro monster's level. All materials go to the GY.
+       */
+      kind: "SynchroSummon";
+      player: PlayerId;
+      synchroMonster: InstanceId;
+      tuner: InstanceId;
+      nonTuners: InstanceId[];
+      slot: number;
+      position: Exclude<Position, "FaceDownDEF">;
+      useExtraMonsterZone?: 0 | 1;
+    }
+  | {
+      /**
+       * Xyz Summon: 2+ monsters of the same Level matching the Xyz's Rank.
+       * Materials are attached beneath the Xyz monster (not GY).
+       */
+      kind: "XyzSummon";
+      player: PlayerId;
+      xyzMonster: InstanceId;
+      materials: InstanceId[];
+      slot: number;
+      position: Exclude<Position, "FaceDownDEF">;
+      useExtraMonsterZone?: 0 | 1;
+    }
+  | {
+      /**
+       * Link Summon: monsters totaling the Link monster's Link Rating.
+       * Materials go to the GY. Must be summoned to an Extra Monster Zone
+       * (or a zone a Link arrow points to once arrows are honoured).
+       */
+      kind: "LinkSummon";
+      player: PlayerId;
+      linkMonster: InstanceId;
+      materials: InstanceId[];
+      extraMonsterZone: 0 | 1;
+    }
+  | {
+      /**
+       * Ritual Summon: tribute monsters whose Levels sum to ≥ the Ritual
+       * monster's Level, alongside the appropriate Ritual Spell.
+       */
+      kind: "RitualSummon";
+      player: PlayerId;
+      ritualSpell: InstanceId;
+      ritualMonster: InstanceId; // an instance of the Ritual monster in hand
+      tributes: InstanceId[];
+      slot: number;
+      position: Exclude<Position, "FaceDownDEF">;
+    }
+  | {
+      /**
+       * Set a Pendulum monster from your hand to the left or right
+       * Pendulum Zone. Doesn't consume Normal Summon.
+       */
+      kind: "SetPendulumScale";
+      player: PlayerId;
+      hand: InstanceId;
+      side: "left" | "right";
+    }
+  | {
+      /**
+       * Pendulum Summon: with both Pendulum Zones occupied, special-summon
+       * any number of monsters from your hand whose Levels are strictly
+       * between the two scale values.
+       */
+      kind: "PendulumSummon";
+      player: PlayerId;
+      monsters: { handInstance: InstanceId; slot: number; position: Exclude<Position, "FaceDownDEF"> }[];
+    }
+  | { kind: "EquipSpell"; player: PlayerId; spell: InstanceId; target: InstanceId }
   | { kind: "ChainRespond"; player: PlayerId; source: InstanceId; effectKey: string; payload?: Record<string, unknown> }
   | { kind: "ChainPass"; player: PlayerId }
   | { kind: "ResolveChain" }

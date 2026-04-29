@@ -7,6 +7,7 @@ import { Field } from "./components/Field.js";
 import { Hand } from "./components/Hand.js";
 import { PhaseBar } from "./components/PhaseBar.js";
 import { EventLog } from "./components/EventLog.js";
+import { SpecialSummonPanel } from "./components/SpecialSummonPanel.js";
 import { starterDeck } from "./decks/starter.js";
 import { startPracticeMatch } from "./practice/practice-mode.js";
 
@@ -81,6 +82,7 @@ export function App(): JSX.Element {
           <PhaseBar state={state} you={you} />
           <ChainWindow state={state} you={you} />
           <Field state={state} you={you} />
+          <SpecialSummonPanel state={state} you={you} />
           <Hand state={state} you={you} />
           <EventLog events={events} />
           <div style={{ color: "#6b6b8a", fontSize: 12 }}>

@@ -12,31 +12,37 @@ This repo currently holds the **MVP foundation**: a headless rules engine, a Web
 - Monorepo (pnpm workspaces) with engine, shared protocol, cards-data, server, and web packages
 - Deterministic rules engine: serializable `GameState`, pure reducer, seeded RNG
 - Turn/phase state machine (Draw → Standby → Main1 → Battle → Main2 → End)
-- Normal Summon, Tribute Summon (1- and 2-tribute), Set Monster, Flip Summon
-- **Fusion Summon via Polymerization**, with name-multiset material matching
+- All seven canonical summon types end-to-end:
+  - Normal Summon, Tribute Summon (1- and 2-tribute), Set Monster, Flip Summon
+  - **Fusion Summon** via Polymerization (name-multiset material matching)
+  - **Synchro Summon** with Tuner + non-Tuner level matching
+  - **Xyz Summon** with shared-Level → Rank check and material attachment beneath the Xyz
+  - **Link Summon** to Extra Monster Zones with link-rating math
+  - **Ritual Summon** via Ritual Spell + tribute monsters whose Levels sum to ≥ the Ritual monster's Level
+  - **Pendulum Summon**: set both Pendulum Zones, then mass-summon any number of hand monsters whose Levels are strictly between the scales
 - Manual position change (ATK ↔ DEF) with once-per-turn / summon-turn / post-attack guards
-- Set / Play Spell, Set Trap, activate face-down Spells from your field
-- Spell activation pipeline: Pot of Greed (draw 2), Raigeki (board wipe), Monster Reborn (revive from any GY with a UI graveyard picker)
-- Battle Phase: attack declaration, ATK-vs-ATK / ATK-vs-DEF math, direct attacks, face-down flip-on-attack, per-monster once-per-turn lock
-- **Chain response window** with Spell Speed gating: opens after attack declarations, summons, and spell activations; resolves on two consecutive passes; supports negation (Counter Traps) and link skipping
-- Trap responders wired through the chain: **Mirror Force** (Spell Speed 2) destroys the attacker on declaration, **Solemn Judgment** (Spell Speed 3) negates summons or spells at the cost of half LP
+- Spell types: Normal, Ritual, Quick-Play (chain-activate from Set face-down on opponent's turn), Equip (live ATK/DEF bonuses), and `Continuous/Field` recognized but their continuous effects aren't applied
+- Spell activation pipeline: Pot of Greed (draw 2), Raigeki (board wipe), Monster Reborn (revive from any GY with a UI graveyard picker), Polymerization (Fusion), Black Illusion Ritual (Ritual), **Mystical Space Typhoon** (Quick-Play, destroy 1 face-up Spell/Trap), **Black Pendant** (Equip, +500 ATK)
+- Battle Phase: attack declaration, ATK-vs-ATK / ATK-vs-DEF math (with live atk/def bonuses), direct attacks, face-down flip-on-attack, per-monster once-per-turn lock
+- **Chain response window** with Spell Speed gating: opens after attack declarations, summons, and spell activations; resolves on two consecutive passes; supports negation, link skipping, and per-link cleanup (Normal/Counter Traps and Normal/Quick-Play Spells go to GY after resolving)
+- Chain responders: **Mirror Force** (Spell Speed 2 trap), **Solemn Judgment** (Spell Speed 3 Counter Trap, half-LP cost), **Mystical Space Typhoon** (Spell Speed 2 Quick-Play, target picker), **Ash Blossom & Joyous Spring** (Spell Speed 2 hand trap, discard to negate opponent's Special Summon)
 - Concede, life-points-to-zero victory, deck-out victory
 - Server-side fog of war: opponent hand, deck, extra deck, and face-down field cards are redacted before broadcast
 - WebSocket duel server with private room codes
-- **Offline Practice vs AI mode**: in-browser engine instance, no server required, with a heuristic AI driver (legal-action enumerator + scored policy)
-- React client with: field view, hand actions (Summon ATK / Set Monster / Tribute Summon / Activate / Set / Fusion Summon), in-slot position-change & flip & activate-set buttons, click-to-attack flow, chain window banner with Activate / Pass buttons, graveyard picker, fusion picker, event log, phase bar
+- **Offline Practice vs AI mode** (in-browser, no server) — heuristic AI knows every summon type incl. Synchro/Xyz/Link/Ritual/Pendulum and chain-window decisions
+- React client with: field view, hand actions, in-slot position-change & flip & activate-set buttons, click-to-attack flow, chain-window banner (with Mystical Space Typhoon target picker), graveyard picker, fusion picker, equip picker, **Special Summons panel** that auto-lists every legal Synchro/Xyz/Link/Ritual/Pendulum summon for one-click execution
 - PWA manifest (installable on mobile browsers)
 - YGOPRODeck snapshot CLI (`pnpm cards:refresh`)
-- 32 engine tests covering bootstrap, summons, position changes, flips, spells, the battle phase, chain windows (Mirror Force + Solemn Judgment), fusion summons, and AI self-play
+- 44 engine tests covering bootstrap, all seven summon types, position changes, flips, spells, the battle phase, chain windows incl. Mirror Force/Solemn Judgment/Ash Blossom, Quick-Play chained on a Spell, Equip Spell stat bonus, fusion mismatch rejection, and AI self-play
 
-**Stubbed / not yet implemented**
-- Special Summons other than Fusion (Synchro/Xyz/Link/Ritual/Pendulum) — engine accepts the action shape but doesn't yet compute materials or validate procedures
-- Quick-Play Spells from hand on opponent's turn
-- Continuous / Equip / Field Spell handling (they sit face-up but their effects don't apply)
-- Hand traps (Ash Blossom etc.) — defined but the responder predicate isn't wired yet
-- Deckbuilder UI + banlist validation
-- Speed Duels, Tag Duels, anime/game duelist roster, campaign mode
-- Tauri desktop build, Capacitor mobile build
+**Deliberately deferred (pure scope reasons, not engine gaps)**
+- Continuous / Field Spell *runtime effects* — Equip Spells fully work; Continuous and Field Spells can be played and stay face-up but their continuous effects aren't yet a runtime layer (would need an effect-monitor system; out of scope for the playable MVP)
+- Specific hand-trap trigger filters (Ash currently negates any opponent Special Summon — real Ash filters by mill / search / SS-from-deck keywords; needs effect-keyword tags on resolvers)
+- Deckbuilder UI + banlist validation — large standalone UI subsystem
+- Speed Duels (different field layout + Skill cards) — alternate ruleset, fundamental redesign
+- Tag Duels (2v2 shared field) — alternate room model
+- Anime/game duelist roster + campaign mode — content scope, blocked on much wider card-effect coverage
+- Tauri desktop build + Capacitor mobile build — packaging steps, web app already runs on all three platforms via PWA
 
 ## Prerequisites
 

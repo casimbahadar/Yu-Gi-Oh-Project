@@ -95,7 +95,20 @@ function apply(s: GameState, a: Action, ev: GameEvent[]): void {
       return chainPass(s, a.player, ev);
     case "FusionSummon":
       return fusionSummon(s, a.player, a.polymerization, a.fusionMonster, a.materials, a.slot, a.position, ev);
-    // Skeletons — filled in during MVP card work.
+    case "SynchroSummon":
+      return synchroSummon(s, a.player, a.synchroMonster, a.tuner, a.nonTuners, a.slot, a.position, a.useExtraMonsterZone, ev);
+    case "XyzSummon":
+      return xyzSummon(s, a.player, a.xyzMonster, a.materials, a.slot, a.position, a.useExtraMonsterZone, ev);
+    case "LinkSummon":
+      return linkSummon(s, a.player, a.linkMonster, a.materials, a.extraMonsterZone, ev);
+    case "RitualSummon":
+      return ritualSummon(s, a.player, a.ritualSpell, a.ritualMonster, a.tributes, a.slot, a.position, ev);
+    case "SetPendulumScale":
+      return setPendulumScale(s, a.player, a.hand, a.side, ev);
+    case "PendulumSummon":
+      return pendulumSummon(s, a.player, a.monsters, ev);
+    case "EquipSpell":
+      return equipSpell(s, a.player, a.spell, a.target, ev);
     case "ActivateEffect":
     case "SpecialSummon":
       ev.push({ kind: "NotImplemented", action: a.kind });
@@ -649,6 +662,559 @@ function fusionSummon(
   }, ev);
 }
 
+/**
+ * Synchro Summon: 1 Tuner + 1+ non-Tuners on your field whose Levels
+ * sum to the Synchro monster's Level. Materials → GY. Summon to a Main
+ * Monster Zone (or Extra Monster Zone if requested).
+ */
+function synchroSummon(
+  s: GameState,
+  pid: PlayerId,
+  synchroMonsterId: InstanceId,
+  tunerId: InstanceId,
+  nonTunerIds: InstanceId[],
+  slot: number,
+  position: Exclude<import("./types.js").Position, "FaceDownDEF">,
+  useEmz: 0 | 1 | undefined,
+  ev: GameEvent[],
+): void {
+  if (s.phase !== "Main1" && s.phase !== "Main2") {
+    throw new Error("Synchro Summon only in Main Phase");
+  }
+  if (s.turnPlayer !== pid) throw new Error("Not your turn");
+
+  const synchro = s.cards[synchroMonsterId];
+  if (!synchro) throw new Error("Synchro monster not found");
+  if (synchro.owner !== pid || synchro.location.zone !== "extraDeck") {
+    throw new Error("Synchro monster must be in your Extra Deck");
+  }
+  const synchroDef = requireCard(synchro.defId);
+  if (synchroDef.cardType !== "Monster" || !synchroDef.kinds.includes("Synchro")) {
+    throw new Error("Target is not a Synchro monster");
+  }
+  if (!synchroDef.level) throw new Error("Synchro monster has no Level");
+
+  const tuner = s.cards[tunerId];
+  if (!tuner) throw new Error("Tuner not found");
+  const tunerDef = requireCard(tuner.defId);
+  if (tunerDef.cardType !== "Monster" || tunerDef.isTuner !== true) {
+    throw new Error("Provided card is not a Tuner");
+  }
+  if (tuner.controller !== pid || tuner.location.zone !== "mainMonster" || !tuner.faceUp) {
+    throw new Error("Tuner must be face-up on your field");
+  }
+  if (nonTunerIds.length === 0) throw new Error("Synchro requires at least one non-Tuner");
+
+  let levelSum = tunerDef.level ?? 0;
+  for (const id of nonTunerIds) {
+    const m = s.cards[id];
+    if (!m) throw new Error("Material missing");
+    if (m.controller !== pid || m.location.zone !== "mainMonster" || !m.faceUp) {
+      throw new Error("Materials must be face-up monsters on your field");
+    }
+    const md = requireCard(m.defId);
+    if (md.cardType !== "Monster") throw new Error("Material must be a monster");
+    if (md.isTuner === true) throw new Error("Synchro can have only one Tuner material");
+    levelSum += md.level ?? 0;
+  }
+  if (levelSum !== synchroDef.level) {
+    throw new Error(`Synchro Levels must sum to ${synchroDef.level}, got ${levelSum}`);
+  }
+
+  // Send materials to GY.
+  sendCardToGraveyard(s, tunerId, ev);
+  for (const m of nonTunerIds) sendCardToGraveyard(s, m, ev);
+
+  placeExtraDeckMonster(s, pid, synchroMonsterId, slot, position, useEmz, "Synchro", ev);
+}
+
+/**
+ * Xyz Summon: 2+ monsters of the same Level matching the Xyz's Rank.
+ * Materials are attached beneath the Xyz monster (still on field, but
+ * tracked as Xyz Materials in `attached`), not sent to GY.
+ */
+function xyzSummon(
+  s: GameState,
+  pid: PlayerId,
+  xyzMonsterId: InstanceId,
+  materialIds: InstanceId[],
+  slot: number,
+  position: Exclude<import("./types.js").Position, "FaceDownDEF">,
+  useEmz: 0 | 1 | undefined,
+  ev: GameEvent[],
+): void {
+  if (s.phase !== "Main1" && s.phase !== "Main2") throw new Error("Xyz Summon only in Main Phase");
+  if (s.turnPlayer !== pid) throw new Error("Not your turn");
+  const xyz = s.cards[xyzMonsterId];
+  if (!xyz) throw new Error("Xyz monster not found");
+  if (xyz.owner !== pid || xyz.location.zone !== "extraDeck") {
+    throw new Error("Xyz monster must be in your Extra Deck");
+  }
+  const xyzDef = requireCard(xyz.defId);
+  if (xyzDef.cardType !== "Monster" || !xyzDef.kinds.includes("Xyz")) {
+    throw new Error("Target is not an Xyz monster");
+  }
+  if (xyzDef.rank === undefined) throw new Error("Xyz monster has no Rank");
+  if (materialIds.length < 2) throw new Error("Need at least 2 Xyz Materials");
+
+  let sharedLevel: number | null = null;
+  for (const id of materialIds) {
+    const m = s.cards[id];
+    if (!m) throw new Error("Material missing");
+    if (m.controller !== pid || m.location.zone !== "mainMonster" || !m.faceUp) {
+      throw new Error("Materials must be face-up monsters on your field");
+    }
+    const md = requireCard(m.defId);
+    if (md.cardType !== "Monster" || md.level === undefined) {
+      throw new Error("Material must be a monster with a Level");
+    }
+    if (sharedLevel === null) sharedLevel = md.level;
+    else if (md.level !== sharedLevel) throw new Error("All Xyz Materials must share a Level");
+  }
+  if (sharedLevel !== xyzDef.rank) {
+    throw new Error(`Xyz Materials' Level (${sharedLevel}) must match Rank (${xyzDef.rank})`);
+  }
+
+  // Detach materials from their zones — they get attached beneath the Xyz.
+  for (const id of materialIds) {
+    const m = s.cards[id]!;
+    if (m.location.zone === "mainMonster") {
+      s.players[pid].mainMonster[m.location.index] = null;
+    } else if (m.location.zone === "extraMonster") {
+      s.extraMonsterZones[m.location.index] = null;
+    }
+    m.location = { controller: pid, zone: "mainMonster", index: -1 }; // marker — held as material
+    m.position = undefined;
+    m.faceUp = false;
+  }
+
+  placeExtraDeckMonster(s, pid, xyzMonsterId, slot, position, useEmz, "Xyz", ev);
+  // Attach materials beneath.
+  xyz.attached = [...xyz.attached, ...materialIds];
+  ev.push({ kind: "XyzMaterialsAttached", xyz: xyzMonsterId, materials: materialIds });
+}
+
+/**
+ * Link Summon: monsters totaling the Link Rating, sent to the GY.
+ * Must be summoned to an Extra Monster Zone (the simplification — real
+ * rules also allow zones a Link arrow points to).
+ */
+function linkSummon(
+  s: GameState,
+  pid: PlayerId,
+  linkMonsterId: InstanceId,
+  materialIds: InstanceId[],
+  emz: 0 | 1,
+  ev: GameEvent[],
+): void {
+  if (s.phase !== "Main1" && s.phase !== "Main2") throw new Error("Link Summon only in Main Phase");
+  if (s.turnPlayer !== pid) throw new Error("Not your turn");
+  const link = s.cards[linkMonsterId];
+  if (!link) throw new Error("Link monster not found");
+  if (link.owner !== pid || link.location.zone !== "extraDeck") {
+    throw new Error("Link monster must be in your Extra Deck");
+  }
+  const linkDef = requireCard(link.defId);
+  if (linkDef.cardType !== "Monster" || !linkDef.kinds.includes("Link")) {
+    throw new Error("Target is not a Link monster");
+  }
+  const linkRating = linkDef.linkRating ?? 0;
+  if (materialIds.length === 0) throw new Error("Need at least one material");
+  // Materials count toward link rating: each non-Link counts as 1, Link
+  // monsters count as their Link Rating. Total must equal linkRating.
+  let total = 0;
+  for (const id of materialIds) {
+    const m = s.cards[id];
+    if (!m) throw new Error("Material missing");
+    if (m.controller !== pid || (m.location.zone !== "mainMonster" && m.location.zone !== "extraMonster") || !m.faceUp) {
+      throw new Error("Materials must be face-up monsters on your field");
+    }
+    const md = requireCard(m.defId);
+    if (md.cardType !== "Monster") throw new Error("Material must be a monster");
+    total += md.kinds.includes("Link") ? (md.linkRating ?? 1) : 1;
+  }
+  if (total !== linkRating) {
+    throw new Error(`Materials total (${total}) must equal Link Rating (${linkRating})`);
+  }
+
+  if (s.extraMonsterZones[emz] !== null) throw new Error("Extra Monster Zone occupied");
+
+  for (const m of materialIds) sendCardToGraveyard(s, m, ev);
+
+  // Place in EMZ (special-cased below — not via placeExtraDeckMonster).
+  const me = s.players[pid];
+  const idx = me.extraDeck.indexOf(linkMonsterId);
+  if (idx >= 0) me.extraDeck.splice(idx, 1);
+  s.extraMonsterZones[emz] = linkMonsterId;
+  link.controller = pid;
+  link.location = { controller: pid, zone: "extraMonster", index: emz };
+  link.position = "ATK"; // Link monsters can't be in DEF
+  link.faceUp = true;
+  link.flags.summonedThisTurn = true;
+  link.flags.hasAttacked = false;
+  link.flags.positionChangedThisTurn = false;
+  ev.push({
+    kind: "LinkSummon",
+    player: pid,
+    instanceId: linkMonsterId,
+    materials: materialIds,
+    extraMonsterZone: emz,
+  });
+  openChainWindow(s, {
+    kind: "Summoned",
+    summonType: "Special",
+    player: pid,
+    instanceId: linkMonsterId,
+  }, ev);
+}
+
+/**
+ * Ritual Summon: send the Ritual Spell to the GY, tribute monsters
+ * whose Level sums to ≥ the Ritual monster's Level, summon the Ritual
+ * monster from your hand.
+ */
+function ritualSummon(
+  s: GameState,
+  pid: PlayerId,
+  ritualSpellId: InstanceId,
+  ritualMonsterId: InstanceId,
+  tributeIds: InstanceId[],
+  slot: number,
+  position: Exclude<import("./types.js").Position, "FaceDownDEF">,
+  ev: GameEvent[],
+): void {
+  if (s.phase !== "Main1" && s.phase !== "Main2") throw new Error("Ritual Summon only in Main Phase");
+  if (s.turnPlayer !== pid) throw new Error("Not your turn");
+
+  const me = s.players[pid];
+  if (slot < 0 || slot >= 5 || me.mainMonster[slot] !== null) {
+    throw new Error("Invalid or occupied monster zone");
+  }
+
+  const spell = s.cards[ritualSpellId];
+  if (!spell) throw new Error("Ritual Spell not found");
+  if (spell.controller !== pid) throw new Error("Ritual Spell isn't yours");
+  if (spell.location.zone !== "hand" && spell.location.zone !== "spellTrap") {
+    throw new Error("Ritual Spell must be in your hand or face-down on the field");
+  }
+  const spellDef = requireCard(spell.defId);
+  if (spellDef.cardType !== "Spell" || spellDef.kind !== "Ritual") {
+    throw new Error("Card is not a Ritual Spell");
+  }
+
+  const ritual = s.cards[ritualMonsterId];
+  if (!ritual) throw new Error("Ritual monster not found");
+  if (ritual.controller !== pid || ritual.location.zone !== "hand") {
+    throw new Error("Ritual monster must be in your hand");
+  }
+  const ritualDef = requireCard(ritual.defId);
+  if (ritualDef.cardType !== "Monster" || !ritualDef.kinds.includes("Ritual")) {
+    throw new Error("Card is not a Ritual monster");
+  }
+  if (ritualDef.ritualSpell && ritualDef.ritualSpell !== spellDef.name) {
+    throw new Error(`${ritualDef.name} requires ${ritualDef.ritualSpell}`);
+  }
+  if (!ritualDef.level) throw new Error("Ritual monster missing Level");
+
+  let levelSum = 0;
+  for (const t of tributeIds) {
+    const m = s.cards[t];
+    if (!m) throw new Error("Tribute missing");
+    if (m.controller !== pid) throw new Error("Tribute isn't yours");
+    if (m.location.zone !== "hand" && m.location.zone !== "mainMonster") {
+      throw new Error("Tributes must be on your field or in your hand");
+    }
+    const md = requireCard(m.defId);
+    if (md.cardType !== "Monster" || !md.level) {
+      throw new Error("Tribute must be a monster with a Level");
+    }
+    levelSum += md.level;
+  }
+  if (levelSum < ritualDef.level) {
+    throw new Error(`Tributes' Levels must sum to at least ${ritualDef.level}`);
+  }
+
+  // Tribute → GY. Then send the Ritual Spell. Then place the Ritual monster.
+  for (const t of tributeIds) sendCardToGraveyard(s, t, ev);
+  sendCardToGraveyard(s, ritualSpellId, ev);
+
+  // Move Ritual monster from hand → field.
+  const handIdx = me.hand.indexOf(ritualMonsterId);
+  if (handIdx >= 0) me.hand.splice(handIdx, 1);
+  me.mainMonster[slot] = ritualMonsterId;
+  ritual.location = { controller: pid, zone: "mainMonster", index: slot };
+  ritual.position = position;
+  ritual.faceUp = true;
+  ritual.flags.summonedThisTurn = true;
+  ritual.flags.hasAttacked = false;
+  ritual.flags.positionChangedThisTurn = false;
+
+  ev.push({
+    kind: "RitualSummon",
+    player: pid,
+    instanceId: ritualMonsterId,
+    tributes: tributeIds,
+    slot,
+    position,
+  });
+  openChainWindow(s, {
+    kind: "Summoned",
+    summonType: "Special",
+    player: pid,
+    instanceId: ritualMonsterId,
+  }, ev);
+}
+
+/**
+ * Place a Pendulum monster from your hand into the left or right
+ * Pendulum Zone (which lives at the edge slots of your Spell/Trap row:
+ * slot 0 for left, slot 4 for right). Doesn't consume Normal Summon.
+ * In a fully detailed engine this would also open a chain window for
+ * "Pendulum Spell activated" — for MVP we just place the card.
+ */
+function setPendulumScale(
+  s: GameState,
+  pid: PlayerId,
+  handInstance: InstanceId,
+  side: "left" | "right",
+  ev: GameEvent[],
+): void {
+  if (s.phase !== "Main1" && s.phase !== "Main2") {
+    throw new Error("Pendulum scale setup only in Main Phase");
+  }
+  if (s.turnPlayer !== pid) throw new Error("Not your turn");
+
+  const me = s.players[pid];
+  const card = s.cards[handInstance];
+  if (!card || card.controller !== pid || card.location.zone !== "hand") {
+    throw new Error("Card must be in your hand");
+  }
+  const def = requireCard(card.defId);
+  if (def.cardType !== "Monster" || !def.kinds.includes("Pendulum")) {
+    throw new Error("Card is not a Pendulum monster");
+  }
+  const slotIdx = side === "left" ? 0 : 4;
+  if (me.spellTrap[slotIdx] !== null) {
+    throw new Error(`${side} Pendulum Zone is occupied`);
+  }
+
+  const i = me.hand.indexOf(handInstance);
+  if (i >= 0) me.hand.splice(i, 1);
+  me.spellTrap[slotIdx] = handInstance;
+  card.location = { controller: pid, zone: "spellTrap", index: slotIdx };
+  card.faceUp = true;
+  if (side === "left") me.pendulumScale.left = handInstance;
+  else me.pendulumScale.right = handInstance;
+  ev.push({ kind: "PendulumScaleSet", player: pid, instanceId: handInstance, side });
+}
+
+/**
+ * Pendulum Summon: with both Pendulum Zones occupied, special-summon
+ * any number of monsters from your hand whose Levels are strictly between
+ * the two scales. Doesn't consume Normal Summon.
+ */
+function pendulumSummon(
+  s: GameState,
+  pid: PlayerId,
+  monsters: { handInstance: InstanceId; slot: number; position: Exclude<import("./types.js").Position, "FaceDownDEF"> }[],
+  ev: GameEvent[],
+): void {
+  if (s.phase !== "Main1" && s.phase !== "Main2") {
+    throw new Error("Pendulum Summon only in Main Phase");
+  }
+  if (s.turnPlayer !== pid) throw new Error("Not your turn");
+
+  const me = s.players[pid];
+  const left = me.pendulumScale.left ? s.cards[me.pendulumScale.left] : null;
+  const right = me.pendulumScale.right ? s.cards[me.pendulumScale.right] : null;
+  if (!left || !right) throw new Error("Both Pendulum Zones must be set");
+  const leftDef = requireCard(left.defId);
+  const rightDef = requireCard(right.defId);
+  if (leftDef.cardType !== "Monster" || rightDef.cardType !== "Monster") {
+    throw new Error("Pendulum Zones don't hold Pendulum monsters");
+  }
+  const lo = Math.min(leftDef.pendulumScale ?? 0, rightDef.pendulumScale ?? 0);
+  const hi = Math.max(leftDef.pendulumScale ?? 0, rightDef.pendulumScale ?? 0);
+
+  if (monsters.length === 0) throw new Error("Pendulum Summon needs at least one monster");
+
+  // Validate everything before mutating any state.
+  const usedSlots = new Set<number>();
+  for (const m of monsters) {
+    if (m.slot < 0 || m.slot >= 5) throw new Error("Invalid slot");
+    if (usedSlots.has(m.slot)) throw new Error("Duplicate target slot");
+    usedSlots.add(m.slot);
+    if (me.mainMonster[m.slot] !== null) throw new Error("Slot occupied");
+    const card = s.cards[m.handInstance];
+    if (!card || card.controller !== pid || card.location.zone !== "hand") {
+      throw new Error("Card must be in your hand");
+    }
+    const def = requireCard(card.defId);
+    if (def.cardType !== "Monster") throw new Error("Pendulum-summoned card must be a monster");
+    if (def.kinds.includes("Fusion") || def.kinds.includes("Synchro") ||
+        def.kinds.includes("Xyz") || def.kinds.includes("Link")) {
+      throw new Error("Cannot Pendulum Summon Extra Deck monsters from hand (in MVP)");
+    }
+    if (def.level === undefined) throw new Error("Monster has no Level");
+    if (!(def.level > lo && def.level < hi)) {
+      throw new Error(`Level must be between ${lo} and ${hi}`);
+    }
+  }
+
+  // All valid — perform the summon.
+  for (const m of monsters) {
+    const card = s.cards[m.handInstance]!;
+    const i = me.hand.indexOf(m.handInstance);
+    if (i >= 0) me.hand.splice(i, 1);
+    me.mainMonster[m.slot] = m.handInstance;
+    card.location = { controller: pid, zone: "mainMonster", index: m.slot };
+    card.position = m.position;
+    card.faceUp = true;
+    card.flags.summonedThisTurn = true;
+    card.flags.hasAttacked = false;
+    card.flags.positionChangedThisTurn = false;
+  }
+  ev.push({
+    kind: "PendulumSummon",
+    player: pid,
+    monsters: monsters.map((m) => ({ instanceId: m.handInstance, slot: m.slot, position: m.position })),
+  });
+  // Pendulum Summon fires one chain window for the whole batch
+  // (simplification — real rules treat each summon as simultaneous on the
+  // same chain). MVP picks the first as the "trigger" instance.
+  const first = monsters[0]!;
+  openChainWindow(s, {
+    kind: "Summoned",
+    summonType: "Special",
+    player: pid,
+    instanceId: first.handInstance,
+  }, ev);
+}
+
+/** Activate an Equip Spell from hand or face-down field, attaching it to a target monster. */
+function equipSpell(
+  s: GameState,
+  pid: PlayerId,
+  spellId: InstanceId,
+  targetId: InstanceId,
+  ev: GameEvent[],
+): void {
+  if (s.phase !== "Main1" && s.phase !== "Main2") {
+    throw new Error("Equip activation only in Main Phase");
+  }
+  if (s.turnPlayer !== pid) throw new Error("Not your turn");
+
+  const spell = s.cards[spellId];
+  if (!spell || spell.controller !== pid) throw new Error("Spell not yours");
+  if (spell.location.zone !== "hand" && spell.location.zone !== "spellTrap") {
+    throw new Error("Spell must be in your hand or face-down on the field");
+  }
+  const def = requireCard(spell.defId);
+  if (def.cardType !== "Spell" || def.kind !== "Equip") {
+    throw new Error("Card is not an Equip Spell");
+  }
+
+  const target = s.cards[targetId];
+  if (!target) throw new Error("Target not found");
+  if (target.location.zone !== "mainMonster" && target.location.zone !== "extraMonster") {
+    throw new Error("Target must be a face-up monster on the field");
+  }
+  if (!target.faceUp) throw new Error("Target must be face-up");
+
+  // Move spell to face-up Spell/Trap zone of the equipping player.
+  const me = s.players[pid];
+  if (spell.location.zone === "hand") {
+    const i = me.hand.indexOf(spellId);
+    if (i >= 0) me.hand.splice(i, 1);
+    const slot = me.spellTrap.findIndex((x) => x === null);
+    if (slot < 0) throw new Error("No free Spell/Trap zone");
+    me.spellTrap[slot] = spellId;
+    spell.location = { controller: pid, zone: "spellTrap", index: slot };
+  }
+  spell.faceUp = true;
+
+  // Attach via the target's `equipped` array; apply a stat bonus if any.
+  target.equipped = [...(target.equipped ?? []), spellId];
+  applyEquipStats(s, target, +1);
+
+  ev.push({ kind: "Equipped", spell: spellId, target: targetId });
+  // Equip Spells go on the chain like other Spell activations so they
+  // can be negated. MVP simplification: open the chain window directly.
+  openChainWindow(s, { kind: "SpellActivated", player: pid, source: spellId }, ev);
+}
+
+/** Recompute a monster's atk/def bonus based on its currently-equipped spells. */
+function applyEquipStats(s: GameState, monster: CardInstance, _multiplier: number): void {
+  let atkBonus = 0;
+  let defBonus = 0;
+  for (const sId of monster.equipped ?? []) {
+    const equipCard = s.cards[sId];
+    if (!equipCard || equipCard.location.zone !== "spellTrap" || !equipCard.faceUp) continue;
+    try {
+      const def = requireCard(equipCard.defId);
+      if (def.cardType !== "Spell" || def.kind !== "Equip") continue;
+      // Static map of equip-spell stat lines. Add more entries as cards land.
+      if (def.id === EQUIP_BLACK_PENDANT_ID) atkBonus += 500;
+    } catch { /* */ }
+  }
+  monster.atkBonus = atkBonus;
+  monster.defBonus = defBonus;
+}
+
+/** Card-id constant pulled from cards/index.ts. Kept here to avoid a cycle. */
+const EQUIP_BLACK_PENDANT_ID = 65169794;
+
+/**
+ * Common tail of Fusion/Synchro/Xyz Summon: take a card from the Extra
+ * Deck, place it on a Main or Extra Monster Zone, set per-turn flags,
+ * fire a Summoned chain window with the right summonType.
+ */
+function placeExtraDeckMonster(
+  s: GameState,
+  pid: PlayerId,
+  instanceId: InstanceId,
+  slot: number,
+  position: Exclude<import("./types.js").Position, "FaceDownDEF">,
+  useEmz: 0 | 1 | undefined,
+  kind: "Fusion" | "Synchro" | "Xyz",
+  ev: GameEvent[],
+): void {
+  const me = s.players[pid];
+  const card = s.cards[instanceId]!;
+  const idx = me.extraDeck.indexOf(instanceId);
+  if (idx >= 0) me.extraDeck.splice(idx, 1);
+  if (useEmz !== undefined) {
+    if (s.extraMonsterZones[useEmz] !== null) throw new Error("Extra Monster Zone occupied");
+    s.extraMonsterZones[useEmz] = instanceId;
+    card.location = { controller: pid, zone: "extraMonster", index: useEmz };
+  } else {
+    if (slot < 0 || slot >= 5) throw new Error("Invalid slot");
+    if (me.mainMonster[slot] !== null) throw new Error("Monster zone occupied");
+    me.mainMonster[slot] = instanceId;
+    card.location = { controller: pid, zone: "mainMonster", index: slot };
+  }
+  card.controller = pid;
+  card.position = position;
+  card.faceUp = true;
+  card.flags.summonedThisTurn = true;
+  card.flags.hasAttacked = false;
+  card.flags.positionChangedThisTurn = false;
+  ev.push({
+    kind: `${kind}Summon`,
+    player: pid,
+    instanceId,
+    slot,
+    position,
+    extraMonsterZone: useEmz ?? null,
+  });
+  openChainWindow(s, {
+    kind: "Summoned",
+    summonType: "Special",
+    player: pid,
+    instanceId,
+  }, ev);
+}
+
 /** Send a card from any zone to its owner's Graveyard (without destroying). */
 function sendCardToGraveyard(
   s: GameState,
@@ -670,6 +1236,17 @@ function sendCardToGraveyard(
       break;
     }
     default: break;
+  }
+  // If this card is an Equip Spell, detach from any monster equipping it
+  // and recompute that monster's stat bonuses.
+  for (const otherId of Object.keys(s.cards)) {
+    const other = s.cards[otherId];
+    if (!other?.equipped) continue;
+    const i = other.equipped.indexOf(id);
+    if (i >= 0) {
+      other.equipped.splice(i, 1);
+      applyEquipStats(s, other, +1);
+    }
   }
   card.location = {
     controller: card.owner,
@@ -775,14 +1352,16 @@ function performAttackDamageStep(
   const attackerDef = monsterDef(attacker.defId);
   const opp = opponentOf(attackingPlayer);
 
+  const directAtk = effectiveAtk(attacker, attackerDef);
+
   if (target === "direct") {
     if (opponentHasMonster(s, opp)) {
       // Opponent summoned a blocker mid-chain — direct attack fizzles.
       ev.push({ kind: "AttackFizzled", reason: "opponent now has monsters" });
       return;
     }
-    changeLp(s, opp, -attackerDef.atk, ev);
-    ev.push({ kind: "DirectAttack", attacker: attackerId, damage: attackerDef.atk });
+    changeLp(s, opp, -directAtk, ev);
+    ev.push({ kind: "DirectAttack", attacker: attackerId, damage: directAtk });
     return;
   }
 
@@ -803,14 +1382,15 @@ function performAttackDamageStep(
     ev.push({ kind: "FlippedFaceUp", instanceId: target });
   }
 
+  const atkVal = effectiveAtk(attacker, attackerDef);
+
   if (defender.position === "ATK") {
-    const aATK = attackerDef.atk;
-    const dATK = defenderDef.atk;
-    if (aATK > dATK) {
-      changeLp(s, opp, -(aATK - dATK), ev);
+    const dATK = effectiveAtk(defender, defenderDef);
+    if (atkVal > dATK) {
+      changeLp(s, opp, -(atkVal - dATK), ev);
       destroyMonster(s, target, ev);
-    } else if (aATK < dATK) {
-      changeLp(s, attackingPlayer, -(dATK - aATK), ev);
+    } else if (atkVal < dATK) {
+      changeLp(s, attackingPlayer, -(dATK - atkVal), ev);
       destroyMonster(s, attackerId, ev);
     } else {
       destroyMonster(s, attackerId, ev);
@@ -821,23 +1401,22 @@ function performAttackDamageStep(
       attacker: attackerId,
       target,
       mode: "ATKvsATK",
-      attackerATK: aATK,
+      attackerATK: atkVal,
       targetATK: dATK,
     });
   } else {
-    const aATK = attackerDef.atk;
-    const dDEF = defenderDef.def ?? 0;
-    if (aATK > dDEF) {
+    const dDEF = effectiveDef(defender, defenderDef);
+    if (atkVal > dDEF) {
       destroyMonster(s, target, ev);
-    } else if (aATK < dDEF) {
-      changeLp(s, attackingPlayer, -(dDEF - aATK), ev);
+    } else if (atkVal < dDEF) {
+      changeLp(s, attackingPlayer, -(dDEF - atkVal), ev);
     }
     ev.push({
       kind: "BattleResolved",
       attacker: attackerId,
       target,
       mode: "ATKvsDEF",
-      attackerATK: aATK,
+      attackerATK: atkVal,
       targetDEF: dDEF,
     });
   }
@@ -893,7 +1472,7 @@ function chainRespond(
   if (top && reg.spellSpeed < top.spellSpeed) {
     throw new Error(`${def.name} (Spell Speed ${reg.spellSpeed}) cannot respond to Spell Speed ${top.spellSpeed}`);
   }
-  // Traps: must be face-down on field, not just-set this turn.
+  // Trap activation requirements: face-down on field, not just-set this turn.
   if (def.cardType === "Trap") {
     if (card.location.zone !== "spellTrap" || card.faceUp) {
       throw new Error("Trap is not Set on the field");
@@ -903,6 +1482,26 @@ function chainRespond(
     }
     card.faceUp = true;
     ev.push({ kind: "TrapActivated", instanceId: sourceId, player: pid });
+  } else if (def.cardType === "Spell") {
+    // Quick-Play Spells from the field follow the same gating as Traps.
+    if (def.kind !== "Quick-Play") {
+      throw new Error("Only Quick-Play Spells can be chain-activated");
+    }
+    if (card.location.zone !== "spellTrap" || card.faceUp) {
+      throw new Error("Quick-Play Spell is not Set on the field");
+    }
+    if (card.flags.setThisTurn === true && reg.ignoreSetThisTurn !== true) {
+      throw new Error("Cannot activate a Quick-Play Spell the turn it was Set");
+    }
+    card.faceUp = true;
+    ev.push({ kind: "SpellActivated", instanceId: sourceId, player: pid });
+  } else if (def.cardType === "Monster") {
+    // Hand traps (Ash Blossom etc.) — discarded from hand to activate.
+    if (card.location.zone !== "hand") {
+      throw new Error("Hand trap must be activated from your hand");
+    }
+    sendCardToGraveyard(s, sourceId, ev);
+    ev.push({ kind: "HandTrapActivated", instanceId: sourceId, player: pid });
   }
 
   if (reg.onActivate) reg.onActivate(s, card, ev);
@@ -932,7 +1531,29 @@ function chainPass(s: GameState, pid: PlayerId, ev: GameEvent[]): void {
 function closeChainWindow(s: GameState, ev: GameEvent[]): void {
   const w = s.pendingChainWindow;
   if (!w) return;
+  // Snapshot every link's source before resolveChain consumes the chain —
+  // we need them to dispose Normal/Quick-Play Spells and Normal/Counter
+  // Traps after their effects run.
+  const linkSources = s.chain.map((l) => l.source);
   resolveChain(s, ev);
+
+  // Universal post-resolution disposal: any face-up card on the field
+  // that just resolved on the chain and would normally go to the GY
+  // does so now. Continuous/Equip/Field Spells and Continuous Traps stay.
+  for (const sid of linkSources) {
+    const card = s.cards[sid];
+    if (!card) continue;
+    if (card.location.zone !== "spellTrap") continue;
+    try {
+      const def = requireCard(card.defId);
+      if (def.cardType === "Spell" && (def.kind === "Normal" || def.kind === "Quick-Play" || def.kind === "Ritual")) {
+        sendCardToGraveyard(s, sid, ev);
+      } else if (def.cardType === "Trap" && (def.kind === "Normal" || def.kind === "Counter")) {
+        sendCardToGraveyard(s, sid, ev);
+      }
+    } catch { /* */ }
+  }
+
   const trigger = w.trigger;
   const negated = w.triggerNegated;
   s.pendingChainWindow = null;
@@ -940,7 +1561,6 @@ function closeChainWindow(s: GameState, ev: GameEvent[]): void {
 
   switch (trigger.kind) {
     case "AttackDeclared":
-      // Skip the damage step if the attack was negated by a Counter Trap.
       if (!negated) {
         performAttackDamageStep(
           s,
@@ -952,24 +1572,10 @@ function closeChainWindow(s: GameState, ev: GameEvent[]): void {
       }
       return;
     case "Summoned":
-      // The summon already happened. If it had been negated, the
-      // negating effect (e.g., Solemn Judgment) destroyed the monster.
-      // Nothing else to do here.
       return;
-    case "SpellActivated": {
-      // Send Normal/Ritual Spells to the GY whether or not the activation
-      // was negated. Continuous/Field/Equip remain face-up on the field.
-      const card = s.cards[trigger.source];
-      if (card) {
-        try {
-          const def = requireCard(card.defId);
-          if (def.cardType === "Spell" && (def.kind === "Normal" || def.kind === "Ritual")) {
-            sendCardToGraveyard(s, trigger.source, ev);
-          }
-        } catch { /* unknown */ }
-      }
+    case "SpellActivated":
+      // Already handled by the universal disposal above.
       return;
-    }
   }
 }
 
@@ -985,6 +1591,16 @@ function monsterDef(defId: number): MonsterDefinition {
     throw new Error(`Card ${defId} is not a monster`);
   }
   return def;
+}
+
+/** Live ATK after Equip Spell / continuous-effect bonuses. */
+function effectiveAtk(card: CardInstance, def: MonsterDefinition): number {
+  return Math.max(0, def.atk + (card.atkBonus ?? 0));
+}
+
+/** Live DEF after Equip Spell / continuous-effect bonuses. */
+function effectiveDef(card: CardInstance, def: MonsterDefinition): number {
+  return Math.max(0, (def.def ?? 0) + (card.defBonus ?? 0));
 }
 
 function destroyMonster(s: GameState, id: InstanceId, ev: GameEvent[]): void {
@@ -1007,12 +1623,18 @@ function destroyMonster(s: GameState, id: InstanceId, ev: GameEvent[]): void {
     ev.push({ kind: "MaterialToGraveyard", instanceId: matId });
   }
   card.attached = [];
+  // Equipped spells go to GY too.
+  const equipped = card.equipped ?? [];
+  card.equipped = [];
+  card.atkBonus = 0;
+  card.defBonus = 0;
   card.location = { controller: card.owner, zone: "graveyard", index: owner.graveyard.length };
   card.controller = card.owner;
   card.position = undefined;
   card.faceUp = true;
   owner.graveyard.push(id);
   ev.push({ kind: "Destroyed", instanceId: id, by: "battle" });
+  for (const equipId of equipped) sendCardToGraveyard(s, equipId, ev);
 }
 
 function changeLp(s: GameState, pid: PlayerId, delta: number, ev: GameEvent[]): void {

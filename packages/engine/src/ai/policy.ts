@@ -146,8 +146,6 @@ function scoreAction(state: GameState, pid: PlayerId, a: Action): number {
       if (!c) return -1000;
       const def = safeMonster(c.defId);
       if (!def) return -1000;
-      // Big tempo gain — fusion monsters are usually huge. Subtract some
-      // ATK for materials we lose (best estimate without re-scoring).
       let lostAtk = 0;
       for (const m of a.materials) {
         const card = state.cards[m];
@@ -156,6 +154,70 @@ function scoreAction(state: GameState, pid: PlayerId, a: Action): number {
         if (md) lostAtk += md.atk;
       }
       return 150 + (def.atk - lostAtk) / 40;
+    }
+    case "SynchroSummon": {
+      const c = state.cards[a.synchroMonster];
+      const def = c ? safeMonster(c.defId) : null;
+      if (!def) return -1000;
+      let lost = 0;
+      for (const id of [a.tuner, ...a.nonTuners]) {
+        const card = state.cards[id];
+        const md = card ? safeMonster(card.defId) : null;
+        if (md && card?.location.zone === "mainMonster") lost += md.atk;
+      }
+      return 140 + (def.atk - lost) / 40;
+    }
+    case "XyzSummon": {
+      const c = state.cards[a.xyzMonster];
+      const def = c ? safeMonster(c.defId) : null;
+      if (!def) return -1000;
+      let lost = 0;
+      for (const id of a.materials) {
+        const card = state.cards[id];
+        const md = card ? safeMonster(card.defId) : null;
+        if (md) lost += md.atk;
+      }
+      return 130 + (def.atk - lost) / 40;
+    }
+    case "LinkSummon": {
+      const c = state.cards[a.linkMonster];
+      const def = c ? safeMonster(c.defId) : null;
+      if (!def) return -1000;
+      let lost = 0;
+      for (const id of a.materials) {
+        const card = state.cards[id];
+        const md = card ? safeMonster(card.defId) : null;
+        if (md) lost += md.atk;
+      }
+      return 130 + (def.atk - lost) / 40;
+    }
+    case "RitualSummon": {
+      const c = state.cards[a.ritualMonster];
+      const def = c ? safeMonster(c.defId) : null;
+      if (!def) return -1000;
+      let lost = 0;
+      for (const id of a.tributes) {
+        const card = state.cards[id];
+        const md = card ? safeMonster(card.defId) : null;
+        if (md) lost += md.atk;
+      }
+      return 120 + (def.atk - lost) / 40;
+    }
+    case "EquipSpell": {
+      const target = state.cards[a.target];
+      if (!target || target.controller !== pid) return -10;
+      return 25; // moderate utility — boosts your monster
+    }
+    case "SetPendulumScale":
+      return 12;
+    case "PendulumSummon": {
+      let total = 0;
+      for (const m of a.monsters) {
+        const c = state.cards[m.handInstance];
+        const md = c ? safeMonster(c.defId) : null;
+        if (md) total += md.atk;
+      }
+      return 100 + total / 50;
     }
     case "DeclareAttack": {
       const attacker = state.cards[a.attacker];
@@ -201,6 +263,13 @@ export function describeAction(a: Action, getName: (id: string) => string): stri
     case "SetMonster": return `Sets a monster face-down`;
     case "TributeSummon": return `Tribute Summons ${getName(a.hand)}`;
     case "FusionSummon": return `Fusion Summons ${getName(a.fusionMonster)}`;
+    case "SynchroSummon": return `Synchro Summons ${getName(a.synchroMonster)}`;
+    case "XyzSummon": return `Xyz Summons ${getName(a.xyzMonster)}`;
+    case "LinkSummon": return `Link Summons ${getName(a.linkMonster)}`;
+    case "RitualSummon": return `Ritual Summons ${getName(a.ritualMonster)}`;
+    case "SetPendulumScale": return `sets a Pendulum Scale`;
+    case "PendulumSummon": return `Pendulum Summons ${a.monsters.length} monster(s)`;
+    case "EquipSpell": return `equips ${getName(a.spell)} to ${getName(a.target)}`;
     case "PlaySpell": return a.faceDown ? `Sets a Spell` : `activates ${getName(a.hand)}`;
     case "SetTrap": return `Sets a Trap`;
     case "ActivateSetSpell": return `activates ${getName(a.spellTrap)}`;

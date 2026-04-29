@@ -8,6 +8,7 @@ import type {
   SpellSpeed,
 } from "./types.js";
 import type { GameState } from "./state.js";
+import { getCard } from "./registry.js";
 
 /**
  * Chain resolution — skeleton.
@@ -160,6 +161,8 @@ export function findActivatableResponders(
   trigger: ChainTrigger,
 ): { source: CardInstance; reg: ChainResponderRegistration }[] {
   const out: { source: CardInstance; reg: ChainResponderRegistration }[] = [];
+  const top = state.chain[state.chain.length - 1];
+  // Face-down field cards (Traps + Quick-Play Spells).
   for (const id of state.players[pid].spellTrap) {
     if (!id) continue;
     const card = state.cards[id];
@@ -168,11 +171,22 @@ export function findActivatableResponders(
     const reg = respondersByDefId.get(card.defId);
     if (!reg) continue;
     if (!reg.canRespond(trigger, state, card)) continue;
-    const top = state.chain[state.chain.length - 1];
     if (top && reg.spellSpeed < top.spellSpeed) continue;
     out.push({ source: card, reg });
   }
-  // Hand responders (e.g. Ash Blossom) — none in the MVP card set yet,
-  // but the structure stays here for when they're added.
+  // Hand responders (Ash Blossom & other hand traps). Only Monster-type
+  // cards can activate from hand — Traps and Spells in hand must be
+  // Set before they can chain.
+  for (const id of state.players[pid].hand) {
+    const card = state.cards[id];
+    if (!card) continue;
+    const def = getCard(card.defId);
+    if (!def || def.cardType !== "Monster") continue;
+    const reg = respondersByDefId.get(card.defId);
+    if (!reg) continue;
+    if (!reg.canRespond(trigger, state, card)) continue;
+    if (top && reg.spellSpeed < top.spellSpeed) continue;
+    out.push({ source: card, reg });
+  }
   return out;
 }

@@ -90,7 +90,7 @@ const cards: CardDefinition[] = [
     level: 3,
     atk: 0,
     def: 1800,
-    text: "Hand trap. Negate one of: adds from deck / special summons from deck / sends from deck / mills.",
+    text: "(Hand Trap, Spell Speed 2) Discard from hand to negate the next Special Summon.",
   },
   {
     id: 70781052,
@@ -103,6 +103,19 @@ const cards: CardDefinition[] = [
     atk: 2500,
     def: 1200,
     text: "A fiend with dark powers. (Tribute Summon target.)",
+  },
+  {
+    id: 70781022,
+    name: "Junk Synchron",
+    cardType: "Monster",
+    kinds: ["Effect"],
+    attribute: "DARK",
+    race: "Warrior",
+    level: 3,
+    atk: 1300,
+    def: 500,
+    isTuner: true,
+    text: "Tuner. Used to Synchro Summon Stardust Dragon and other Synchro monsters.",
   },
 
   // --- Ritual ---
@@ -117,6 +130,7 @@ const cards: CardDefinition[] = [
     atk: 0,
     def: 0,
     text: "Ritual summoned with Black Illusion Ritual.",
+    ritualSpell: "Black Illusion Ritual",
   },
 
   // --- Fusion ---
@@ -180,6 +194,19 @@ const cards: CardDefinition[] = [
     pendulumScale: 1,
     text: "Pendulum scale 1.",
   },
+  {
+    id: 16195942,
+    name: "Timegazer Magician",
+    cardType: "Monster",
+    kinds: ["Pendulum", "Effect"],
+    attribute: "DARK",
+    race: "Spellcaster",
+    level: 3,
+    atk: 1200,
+    def: 600,
+    pendulumScale: 8,
+    text: "Pendulum scale 8.",
+  },
 
   // --- Link ---
   {
@@ -223,6 +250,27 @@ const cards: CardDefinition[] = [
     cardType: "Spell",
     kind: "Normal",
     text: "Fusion Summon 1 Fusion Monster from your Extra Deck, using monsters from your hand or field as Fusion Material.",
+  },
+  {
+    id: 41426869,
+    name: "Black Illusion Ritual",
+    cardType: "Spell",
+    kind: "Ritual",
+    text: "Ritual Summon Relinquished from your hand by tributing monsters whose total Levels equal 1.",
+  },
+  {
+    id: 5318639,
+    name: "Mystical Space Typhoon",
+    cardType: "Spell",
+    kind: "Quick-Play",
+    text: "Target 1 Spell or Trap your opponent controls; destroy it.",
+  },
+  {
+    id: 65169794,
+    name: "Black Pendant",
+    cardType: "Spell",
+    kind: "Equip",
+    text: "The equipped monster gains 500 ATK. When this card is sent from the field to the GY: inflict 500 damage to your opponent. (MVP: ATK boost only.)",
   },
 
   // --- Traps ---
@@ -359,6 +407,53 @@ registerResponder(44095762, {
   canRespond: (trigger, _state, source) =>
     trigger.kind === "AttackDeclared" &&
     trigger.attackingPlayer !== source.controller,
+});
+
+// Ash Blossom & Joyous Spring (hand trap, Spell Speed 2).
+// MVP simplification: discard from hand to negate the next opponent
+// Special Summon. Fires on Summoned-type triggers with summonType
+// "Special". Real Ash triggers on three specific deck-touching effects
+// (search/special-summon-from-deck/mill); we'll layer those once those
+// effect-keyword tags exist on resolvers.
+registerEffect("hand-trap:ash-blossom:resolve", (state, link, events) => {
+  const w = state.pendingChainWindow;
+  if (!w) return;
+  w.triggerNegated = true;
+  events.push({ kind: "Negated", by: link.source, trigger: w.trigger.kind });
+  if (w.trigger.kind === "Summoned") {
+    destroy(state, w.trigger.instanceId, events);
+  }
+});
+registerResponder(14558127, {
+  effectKey: "hand-trap:ash-blossom:resolve",
+  spellSpeed: 2,
+  canRespond: (trigger, _state, source) =>
+    trigger.kind === "Summoned" &&
+    trigger.summonType === "Special" &&
+    trigger.player !== source.controller,
+});
+
+// Mystical Space Typhoon (Quick-Play Spell, Spell Speed 2).
+// Target 1 Spell or Trap your opponent controls; destroy it.
+registerEffect("spell:mst:destroy-st", (state, link, events) => {
+  const targetId = link.payload?.target as InstanceId | undefined;
+  if (!targetId) {
+    events.push({ kind: "EffectFizzled", reason: "no target", source: link.source });
+    return;
+  }
+  const card = state.cards[targetId];
+  if (!card || card.location.zone !== "spellTrap") {
+    events.push({ kind: "EffectFizzled", reason: "target not on field", source: link.source });
+    return;
+  }
+  destroy(state, targetId, events);
+});
+bindActivation(5318639, "spell:mst:destroy-st");
+registerResponder(5318639, {
+  effectKey: "spell:mst:destroy-st",
+  spellSpeed: 2,
+  // MST can chain to anything Spell Speed ≤ 2.
+  canRespond: () => true,
 });
 
 export { cards as SAMPLE_CARDS };
